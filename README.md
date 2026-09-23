@@ -27,4 +27,4 @@ An application can define an `SDKAPI() apispec.Config[ErrorCode]` function in it
 
 mddb declares its JSON routes in `backend/internal/server/dto/sdk.go` and generates the TypeScript client and API reference with the same `apispec` pipeline as caic. `ClientScopes` groups workspace and organization endpoints into bound client factories; `QueryFromReq` serializes typed GET request fields as URL parameters. mddb uses `TypeScriptClientOnly` because tygo separately generates its TypeScript DTO types. Keep the route specification in sync with the router (mddb tests compare their route sets).
 
-Run `make verify` and `make test` to check this module.
+The `tool` directive in `go.mod` pins golangci-lint; `go tool` downloads it automatically without a separate installation step. `make verify` builds a cached custom linter binary with the shared `commentcheck` and `methodfilecheck` plugins (declared in `.custom-gcl.yml`). Run `make fix` to format, `make verify` for static analysis, formatting and module checks, and `make test` for unit tests. CI runs the same verification and tests.

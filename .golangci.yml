@@ -1,0 +1,53 @@
+# Static analysis and formatting for the standalone SDK generator.
+version: "2"
+run:
+  tests: true
+linters:
+  enable:
+    - asciicheck
+    - bodyclose
+    - commentcheck
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - ineffassign
+    - methodfilecheck
+    - misspell
+    - nilerr
+    - nilnil
+    - nolintlint
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - whitespace
+  settings:
+    custom:
+      commentcheck:
+        type: module
+        description: Exported declarations need attached comments starting with their name.
+        settings: {}
+      methodfilecheck:
+        type: module
+        description: Methods belong in the same file as their receiver type.
+        settings: {}
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+  exclusions:
+    generated: lax
+    rules:
+      - path: (.+)\.go$
+        text: should have a package comment
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
