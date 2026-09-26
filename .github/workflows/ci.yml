@@ -14,5 +14,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: make verify
-      - run: make test
+      - name: Verify
+        run: make verify
+      - name: Test
+        run: make test
+      - name: Check that verification leaves the worktree clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(git status --porcelain)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' 'Verification changed tracked files:' "$status" >&2
+            exit 1
+          fi

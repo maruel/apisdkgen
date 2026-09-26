@@ -1,6 +1,6 @@
 # Build, format, and test the standalone API SDK generator.
 .DEFAULT_GOAL := verify
-.PHONY: custom-gcl fix verify test
+.PHONY: custom-gcl fix git-hooks test verify
 
 # The custom binary embeds two module plugins. Cache it by build inputs rather
 # than mtime: golangci-lint builds it in a fresh temporary module each time.
@@ -15,12 +15,19 @@ custom-gcl:
 
 fix:
 	go tool golangci-lint fmt
+	@go tool shfmt -w scripts/check-staged.sh scripts/install-git-hooks.sh scripts/hooks/*
 
 verify: custom-gcl
 	./custom-gcl config verify
 	./custom-gcl run ./...
 	go mod tidy -diff
 	go test -run '^$$' ./...
+	@files=$$(git ls-files '*.sh' 'scripts/hooks/*'); [ -z "$$files" ] || { out=$$(go tool shfmt -l $$files) || exit; [ -z "$$out" ] || { echo "Shell files need shfmt:" >&2; echo "$$out" >&2; exit 1; }; }
+	@python3 scripts/lint_binaries.py
+	@git diff --check
 
 test:
 	go test ./...
+
+git-hooks:
+	@./scripts/install-git-hooks.sh
