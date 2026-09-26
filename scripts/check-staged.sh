@@ -43,3 +43,4 @@ if ((${#shell_files[@]} > 0)); then
 fi
 
 python3 scripts/lint_binaries.py
+python3 scripts/update_agents_file_index.py --check

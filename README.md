@@ -1,4 +1,4 @@
-# apisdkgen
+# apisdkgen - Go API SDK generator
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/maruel/apisdkgen.svg)](https://pkg.go.dev/github.com/maruel/apisdkgen)
 
