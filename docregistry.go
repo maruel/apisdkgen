@@ -646,15 +646,13 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 	}
 	name := t.Name()
 	fmt.Fprintf(b, "export interface %s {\n", name)
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	fields, err := d.jsonFields(t)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -668,7 +666,7 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 
 		// Field-level doc: block comment for multi-line, inline for single-line.
 		fdoc := ""
-		if fdocs, ok := d.fieldDoc[name]; ok {
+		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
 			fdoc = fdocs[sf.Name]
 		}
 		if fdoc != "" {
@@ -868,18 +866,20 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 
 	// Collect base fields (non-pointer, no omitempty, not "kind").
 	var kindExpr string
-	for sf := range t.Fields() {
-		if sf.IsExported() {
-			tag := sf.Tag.Get("json")
-			jsonName, _ := parseJSONTag(tag)
-			if jsonName == "kind" || (jsonName == "" && sf.Name == "Kind") {
-				expr := "asString(obj[\"kind\"], \"" + name + ".kind\")"
-				if _, ok := d.aliasNames[sf.Type.Name()]; ok {
-					expr = "(" + expr + " as " + sf.Type.Name() + ")"
-				}
-				kindExpr = expr
-				break
+	fields, err := d.jsonFields(t)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		sf := f.field
+		jsonName, _ := parseJSONTag(sf.Tag.Get("json"))
+		if jsonName == "kind" || (jsonName == "" && sf.Name == "Kind") {
+			expr := "asString(obj[\"kind\"], \"" + name + ".kind\")"
+			if _, ok := d.aliasNames[sf.Type.Name()]; ok {
+				expr = "(" + expr + " as " + sf.Type.Name() + ")"
 			}
+			kindExpr = expr
+			break
 		}
 	}
 	if kindExpr == "" {
@@ -888,15 +888,9 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 	baseFields := []tsFieldBinding{{"kind", kindExpr}}
 	var variantFields []tsFieldBinding
 
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	for _, f := range fields {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -946,15 +940,13 @@ func (d *docRegistry[C]) emitTSValidator(b *strings.Builder, t reflect.Type) err
 	fmt.Fprintf(b, "  const obj = asObject(raw, %q);\n", name)
 	fmt.Fprintf(b, "  return {\n")
 
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	fields, err := d.jsonFields(t)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -1252,7 +1244,7 @@ function makeRequester(fetchFn: FetchFn) {
 		params := extractPathParams(r.Path)
 		if r.IsSSE {
 			writeRouteTSSSEMethod(r, &b, params)
-		} else if err := writeRouteTSJSONMethod(r, &b, params); err != nil {
+		} else if err := writeRouteTSJSONMethod(d, r, &b, params); err != nil {
 			return err
 		}
 	}
@@ -1267,7 +1259,7 @@ function makeRequester(fetchFn: FetchFn) {
 			params := slices.DeleteFunc(extractPathParams(r.Path), func(p string) bool { return p == scope.Parameter })
 			if r.IsSSE {
 				writeRouteTSSSEMethod(r, &b, params)
-			} else if err := writeRouteTSJSONMethod(r, &b, params); err != nil {
+			} else if err := writeRouteTSJSONMethod(d, r, &b, params); err != nil {
 				return err
 			}
 		}
@@ -1359,16 +1351,14 @@ func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
 
 // parseStructFields extracts kotlinField entries from a reflect.Type.
 func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error) {
-	fields := make([]kotlinField, 0, t.NumField())
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	selected, err := d.jsonFields(t)
+	if err != nil {
+		return nil, err
+	}
+	fields := make([]kotlinField, 0, len(selected))
+	for _, f := range selected {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -1390,7 +1380,7 @@ func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error
 		}
 
 		doc := ""
-		if fdocs, ok := d.fieldDoc[t.Name()]; ok {
+		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
 			doc = fdocs[sf.Name]
 		}
 
@@ -1655,15 +1645,13 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 	}
 	b.WriteString("| Field | Type | Description | Required |\n")
 	b.WriteString("|-------|------|-------------|----------|\n")
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	fields, err := d.jsonFields(t)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -1677,7 +1665,7 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 			req = ""
 		}
 		fieldDoc := ""
-		if fdocs, ok := d.fieldDoc[t.Name()]; ok {
+		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
 			fieldDoc = fdocs[sf.Name]
 		}
 		fmt.Fprintf(b, "| `%s` | `%s` | %s | %s |\n", jsonName, typeName, fieldDoc, req)
@@ -1742,15 +1730,13 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 	fmt.Fprintf(b, "public struct %s: Codable {\n", name)
 	var codingKeys []string
 	needCodingKeys := false
-	for sf := range t.Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		tag := sf.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		jsonName, opts := parseJSONTag(tag)
+	fields, err := d.jsonFields(t)
+	if err != nil {
+		return err
+	}
+	for _, f := range fields {
+		sf := f.field
+		jsonName, opts := parseJSONTag(sf.Tag.Get("json"))
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
@@ -1770,7 +1756,7 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 			codingKeys = append(codingKeys, fmt.Sprintf("        case %s = %q\n", swiftEscapeIdent(rawSwiftName), jsonName))
 		}
 
-		if fdocs, ok := d.fieldDoc[name]; ok {
+		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
 			if fdoc := fdocs[sf.Name]; fdoc != "" {
 				b.WriteString(formatSwiftDoc(fdoc, "    "))
 			}
@@ -1900,6 +1886,91 @@ func (d *docRegistry[C]) generateSwift(outDir string) error {
 		return err
 	}
 	return d.writeSwiftClient(outDir)
+}
+
+type jsonField struct {
+	field reflect.StructField
+	owner reflect.Type
+}
+
+type jsonFieldCandidate struct {
+	jsonField
+	name   string
+	depth  int
+	tagged bool
+}
+
+type jsonFieldChoice struct {
+	index    int
+	depth    int
+	tagged   bool
+	conflict bool
+}
+
+// jsonFields applies encoding/json's embedded-field name precedence. Embedded
+// pointers are rejected because their promoted fields may all be absent.
+func (d *docRegistry[C]) jsonFields(t reflect.Type) ([]jsonField, error) {
+	var candidates []jsonFieldCandidate
+	seen := map[reflect.Type]struct{}{t: {}}
+	var walk func(reflect.Type, int) error
+	walk = func(owner reflect.Type, depth int) error {
+		for sf := range owner.Fields() {
+			base := sf.Type
+			if base.Kind() == reflect.Pointer {
+				base = base.Elem()
+			}
+			if sf.Tag.Get("json") == "-" || (!sf.IsExported() && (!sf.Anonymous || base.Kind() != reflect.Struct)) {
+				continue
+			}
+			name, _ := parseJSONTag(sf.Tag.Get("json"))
+			tagged := name != ""
+			if sf.Anonymous && name == "" && base.Kind() == reflect.Struct {
+				if sf.Type.Kind() == reflect.Pointer {
+					return fmt.Errorf("%s.%s: embedded pointer fields may be absent from JSON; embed by value or give the field a JSON name", owner, sf.Name)
+				}
+				if !isSDKPkg(d.cfg, base.PkgPath()) {
+					return fmt.Errorf("%s.%s: embedded struct package %q is not an SDK package; add it to SDKPackagePaths or give the field a JSON name", owner, sf.Name, base.PkgPath())
+				}
+				if _, ok := seen[base]; !ok {
+					seen[base] = struct{}{}
+					if err := walk(base, depth+1); err != nil {
+						return err
+					}
+					delete(seen, base)
+				}
+				continue
+			}
+			if name == "" {
+				name = sf.Name
+			}
+			candidates = append(candidates, jsonFieldCandidate{jsonField{sf, owner}, name, depth, tagged})
+		}
+		return nil
+	}
+	if err := walk(t, 0); err != nil {
+		return nil, err
+	}
+
+	// At the shallowest depth, an explicitly tagged field wins. Equal-priority
+	// fields conflict, so encoding/json omits that name entirely.
+	best := make(map[string]jsonFieldChoice, len(candidates))
+	for i, field := range candidates {
+		prior, ok := best[field.name]
+		switch {
+		case !ok, field.depth < prior.depth, field.depth == prior.depth && field.tagged && !prior.tagged:
+			best[field.name] = jsonFieldChoice{index: i, depth: field.depth, tagged: field.tagged}
+		case field.depth == prior.depth && field.tagged == prior.tagged:
+			prior.conflict = true
+			best[field.name] = prior
+		}
+	}
+	fields := make([]jsonField, 0, len(best))
+	for i, field := range candidates {
+		if selected := best[field.name]; selected.index == i && !selected.conflict {
+			fields = append(fields, field.jsonField)
+		}
+	}
+	return fields, nil
 }
 
 // snakeToPascal converts SCREAMING_SNAKE_CASE to PascalCase ("BAD_REQUEST" → "BadRequest").
@@ -2097,7 +2168,7 @@ func emitTSAlias(b *strings.Builder, a aliasInfo, open bool) {
 		b.WriteString(" */\n")
 	}
 	for _, c := range a.constants {
-		fmt.Fprintf(b, "export const %s: %s = %q;\n", c.name, a.name, c.value)
+		fmt.Fprintf(b, "export const %s = %q;\n", c.name, c.value)
 	}
 	b.WriteString("\n")
 }

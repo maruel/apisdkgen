@@ -36,7 +36,7 @@ func routeCategoryName(r *apispec.Route) string {
 	return strings.ToUpper(p[:1]) + p[1:]
 }
 
-func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []string) error {
+func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *strings.Builder, params []string) error {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
@@ -73,9 +73,14 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 		}
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => {\n", r.Name, strings.Join(args, ", "), respType)
 		b.WriteString("      const query = new URLSearchParams();\n")
+		fields, err := d.jsonFields(r.Req)
+		if err != nil {
+			return err
+		}
 		for _, q := range r.QueryParams {
 			field := ""
-			for sf := range r.Req.Fields() {
+			for _, f := range fields {
+				sf := f.field
 				if sf.Tag.Get("query") == q {
 					field = sf.Name
 					if name, _, _ := strings.Cut(sf.Tag.Get("json"), ","); name != "" && name != "-" {

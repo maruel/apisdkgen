@@ -14,53 +14,179 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
-type TestJSONRPCRequest struct{}
+type testJSONRPCRequest struct{}
 
-type TestJSONRPCResponse struct{}
+type testJSONRPCResponse struct{}
 
-type TestSDKEvent struct {
+type testSDKEvent struct {
 	Kind string `json:"kind"`
 	Text string `json:"text,omitempty"`
 }
 
-type TestSSEError struct {
+type testSSEError struct {
 	Message string `json:"message"`
 }
 
-type TestPathOnlyRequest struct {
+type testPathOnlyRequest struct {
 	ID string `json:"-" path:"id"`
 }
 
-type TestKotlinDocumentedFields struct {
+type testTSTaggedRequest struct {
+	ID     string `json:"-" path:"id"`
+	IDs    []int  `query:"ids"`
+	Hidden string `json:"-"`
+	Name   string `json:"name"`
+}
+
+type testTSEmbeddedQuotas struct {
+	Limit int `json:"limit"`
+}
+
+type testTSEmbeddedIdentity struct {
+	ID string `json:"id"`
+}
+
+type testTSEmbeddedResponse struct {
+	testTSEmbeddedQuotas
+	testTSEmbeddedIdentity
+	Name string `json:"name"`
+}
+
+type testJSONShadow struct {
+	testTSEmbeddedQuotas
+	Limit string `json:"limit"`
+}
+
+type testJSONSameName struct {
+	Limit string `json:"limit"`
+}
+
+type testJSONConflict struct {
+	testTSEmbeddedQuotas
+	testJSONSameName        //nolint:govet // Deliberately tests an encoding/json name collision.
+	Name             string `json:"name"`
+}
+
+type testJSONPointerEmbed struct {
+	*testTSEmbeddedQuotas
+}
+
+type testJSONForeignEmbed struct {
+	apispec.ClientScope
+}
+
+func TestJSONFieldGeneration(t *testing.T) {
+	t.Parallel()
+	d := &docRegistry[string]{cfg: &apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testTSEmbeddedResponse]().PkgPath(): {}},
+		SpecialTypes:    []apispec.SpecialType{{Type: reflect.TypeFor[[]int](), TSType: "string"}},
+	}}
+	var b strings.Builder
+	if err := d.emitTSStruct(&b, reflect.TypeFor[testTSTaggedRequest]()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := b.String(), "export interface testTSTaggedRequest {\n  IDs: string;\n  name: string;\n}\n"; got != want {
+		t.Fatalf("generated request = %q, want %q", got, want)
+	}
+	b.Reset()
+	if err := d.emitTSStruct(&b, reflect.TypeFor[testTSEmbeddedResponse]()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := b.String(), "export interface testTSEmbeddedResponse {\n  limit: number /* int */;\n  id: string;\n  name: string;\n}\n"; got != want {
+		t.Fatalf("generated response = %q, want %q", got, want)
+	}
+	b.Reset()
+	if err := d.emitTSValidator(&b, reflect.TypeFor[testTSEmbeddedResponse]()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "limit: asNumber(obj[\"limit\"]") || strings.Contains(b.String(), "testTSEmbeddedQuotas:") {
+		t.Fatalf("validator did not flatten fields: %s", b.String())
+	}
+	fields, err := d.parseStructFields(reflect.TypeFor[testTSEmbeddedResponse]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 3 || fields[0].jsonName != "limit" || fields[1].jsonName != "id" || fields[2].jsonName != "name" {
+		t.Fatalf("Kotlin fields did not flatten: %+v", fields)
+	}
+	b.Reset()
+	if err := d.emitSwiftStruct(&b, reflect.TypeFor[testTSEmbeddedResponse]()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "public let limit: Int") || strings.Contains(b.String(), "testTSEmbeddedQuotas") {
+		t.Fatalf("Swift fields did not flatten: %s", b.String())
+	}
+	b.Reset()
+	if err := d.writeDocType(&b, reflect.TypeFor[testTSEmbeddedResponse]()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "| `limit` |") || strings.Contains(b.String(), "| `testTSEmbeddedQuotas` |") {
+		t.Fatalf("API docs did not flatten fields: %s", b.String())
+	}
+}
+
+func TestEmbeddedJSONFieldPrecedence(t *testing.T) {
+	t.Parallel()
+	d := &docRegistry[string]{cfg: &apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testJSONShadow]().PkgPath(): {}},
+	}}
+	for _, tt := range []struct {
+		name   string
+		typeOf reflect.Type
+		want   string
+	}{
+		{"outer field wins", reflect.TypeFor[testJSONShadow](), "export interface testJSONShadow {\n  limit: string;\n}\n"},
+		{"equal depth conflict disappears", reflect.TypeFor[testJSONConflict](), "export interface testJSONConflict {\n  name: string;\n}\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var b strings.Builder
+			if err := d.emitTSStruct(&b, tt.typeOf); err != nil {
+				t.Fatal(err)
+			}
+			if got := b.String(); got != tt.want {
+				t.Fatalf("generated interface = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	t.Run("pointer embed rejected", func(t *testing.T) {
+		var b strings.Builder
+		if err := d.emitTSStruct(&b, reflect.TypeFor[testJSONPointerEmbed]()); err == nil || !strings.Contains(err.Error(), "embedded pointer") {
+			t.Fatalf("expected embedded pointer error, got %v", err)
+		}
+	})
+	t.Run("unconfigured package rejected", func(t *testing.T) {
+		var b strings.Builder
+		if err := d.emitTSStruct(&b, reflect.TypeFor[testJSONForeignEmbed]()); err == nil || !strings.Contains(err.Error(), "SDKPackagePaths") {
+			t.Fatalf("expected SDK package error, got %v", err)
+		}
+	})
+}
+
+type testKotlinDocumentedFields struct {
 	Name string `json:"name"`
 	ID   string `json:"id,omitempty"`
 }
 
-type TestDocAuthKind string
+type testDocAuthKind string
 
-const (
-	TestDocAuthKindOAuth  TestDocAuthKind = "oauth"
-	TestDocAuthKindAPIKey TestDocAuthKind = "apikey"
-)
-
-type TestDocProviderQuota struct {
-	AuthKind TestDocAuthKind `json:"authKind"`
+type testDocProviderQuota struct {
+	AuthKind testDocAuthKind `json:"authKind"`
 }
 
-type TestGeneratedErrorCode string
+type testGeneratedErrorCode string
 
 const (
-	TestGeneratedCodeBadRequest TestGeneratedErrorCode = "BAD_REQUEST"
-	TestGeneratedCodeUnknown    TestGeneratedErrorCode = "UNKNOWN"
+	testGeneratedCodeBadRequest testGeneratedErrorCode = "BAD_REQUEST"
+	testGeneratedCodeUnknown    testGeneratedErrorCode = "UNKNOWN"
 )
 
-type TestGeneratedErrorDetails struct {
-	Code    TestGeneratedErrorCode `json:"code"`
+type testGeneratedErrorDetails struct {
+	Code    testGeneratedErrorCode `json:"code"`
 	Message string                 `json:"message"`
 }
 
-type TestGeneratedErrorResponse struct {
-	Error TestGeneratedErrorDetails `json:"error"`
+type testGeneratedErrorResponse struct {
+	Error testGeneratedErrorDetails `json:"error"`
 }
 
 func TestGenConfigGoTypeToDoc(t *testing.T) {
@@ -102,14 +228,14 @@ func TestDocRegistryGenerateTSTypes(t *testing.T) {
 	t.Run("configured error code type", func(t *testing.T) {
 		t.Parallel()
 
-		errorResponseType := reflect.TypeFor[TestGeneratedErrorResponse]()
-		cfg := apispec.Config[TestGeneratedErrorCode]{
+		errorResponseType := reflect.TypeFor[testGeneratedErrorResponse]()
+		cfg := apispec.Config[testGeneratedErrorCode]{
 			SDKPackagePaths: map[string]struct{}{errorResponseType.PkgPath(): {}},
 			ExtraSeeds:      []reflect.Type{errorResponseType},
 			ErrorModel:      apispec.ClientErrorModel{TypeName: errorResponseType.Name()},
-			ErrorCodes: []apispec.ErrorCodeSpec[TestGeneratedErrorCode]{
-				{Code: TestGeneratedCodeBadRequest, Status: 400},
-				{Code: TestGeneratedCodeUnknown, Status: 500},
+			ErrorCodes: []apispec.ErrorCodeSpec[testGeneratedErrorCode]{
+				{Code: testGeneratedCodeBadRequest, Status: 400},
+				{Code: testGeneratedCodeUnknown, Status: 500},
 			},
 		}
 		tsDir := t.TempDir()
@@ -130,28 +256,29 @@ func TestDocRegistryGenerateTSTypes(t *testing.T) {
 			wants []string
 		}{
 			{dir: tsDir, name: "types.gen.ts", wants: []string{
-				"export type TestGeneratedErrorCode =\n  | \"BAD_REQUEST\"\n  | \"UNKNOWN\"\n  | (string & {});",
-				"code: TestGeneratedErrorCode;",
+				"export type testGeneratedErrorCode =\n  | \"BAD_REQUEST\"\n  | \"UNKNOWN\"\n  | (string & {});",
+				"export const testGeneratedErrorCodeBadRequest = \"BAD_REQUEST\";",
+				"code: testGeneratedErrorCode;",
 			}},
 			{dir: tsDir, name: "api.gen.ts", wants: []string{
-				"import type { TestGeneratedErrorCode, TestGeneratedErrorResponse } from \"./types.gen\";",
-				"public code: TestGeneratedErrorCode,",
+				"import type { testGeneratedErrorCode, testGeneratedErrorResponse } from \"./types.gen\";",
+				"public code: testGeneratedErrorCode,",
 			}},
 			{dir: kotlinDir, name: "Types.kt", wants: []string{
-				"sealed interface TestGeneratedErrorCode {",
-				"data class TestGeneratedErrorDetails(val code: TestGeneratedErrorCode, val message: String)",
+				"sealed interface testGeneratedErrorCode {",
+				"data class testGeneratedErrorDetails(val code: testGeneratedErrorCode, val message: String)",
 			}},
 			{dir: kotlinDir, name: "ApiClient.kt", wants: []string{
-				"val code: TestGeneratedErrorCode,",
-				"TestGeneratedErrorCode.Other(\"UNKNOWN\")",
+				"val code: testGeneratedErrorCode,",
+				"testGeneratedErrorCode.Other(\"UNKNOWN\")",
 			}},
 			{dir: swiftDir, name: "Types.swift", wants: []string{
-				"public struct TestGeneratedErrorCode: Codable, Equatable, Hashable {",
-				"public let code: TestGeneratedErrorCode",
+				"public struct testGeneratedErrorCode: Codable, Equatable, Hashable {",
+				"public let code: testGeneratedErrorCode",
 			}},
 			{dir: swiftDir, name: "ApiClient.swift", wants: []string{
-				"public let code: TestGeneratedErrorCode",
-				"TestGeneratedErrorCode.other(\"UNKNOWN\")",
+				"public let code: testGeneratedErrorCode",
+				"testGeneratedErrorCode.other(\"UNKNOWN\")",
 			}},
 		}
 		for _, file := range files {
@@ -175,7 +302,7 @@ func TestDocRegistryGenerateMarkdownDoc(t *testing.T) {
 	t.Run("enum fields retain their type and values", func(t *testing.T) {
 		t.Parallel()
 		outDir := t.TempDir()
-		quotaType := reflect.TypeFor[TestDocProviderQuota]()
+		quotaType := reflect.TypeFor[testDocProviderQuota]()
 		docs := &docRegistry[string]{
 			cfg: &apispec.Config[string]{
 				APIDocTitle:     "Test API",
@@ -187,12 +314,12 @@ func TestDocRegistryGenerateMarkdownDoc(t *testing.T) {
 					Resp:   quotaType,
 				}},
 			},
-			typeDoc: map[string]string{"TestDocAuthKind": "TestDocAuthKind identifies an authentication method."},
+			typeDoc: map[string]string{"testDocAuthKind": "testDocAuthKind identifies an authentication method."},
 			aliases: []aliasInfo{{
-				name: "TestDocAuthKind",
+				name: "testDocAuthKind",
 				constants: []aliasConstant{
-					{name: "TestDocAuthKindOAuth", value: "oauth"},
-					{name: "TestDocAuthKindAPIKey", value: "apikey", doc: "API key credentials."},
+					{name: "testDocAuthKindOAuth", value: "oauth"},
+					{name: "testDocAuthKindAPIKey", value: "apikey", doc: "API key credentials."},
 				},
 			}},
 		}
@@ -205,10 +332,10 @@ func TestDocRegistryGenerateMarkdownDoc(t *testing.T) {
 		}
 		text := string(data)
 		for _, want := range []string{
-			"### TestDocAuthKind",
+			"### testDocAuthKind",
 			"| `oauth` |  |",
 			"| `apikey` | API key credentials. |",
-			"| `authKind` | `TestDocAuthKind` |  | yes |",
+			"| `authKind` | `testDocAuthKind` |  | yes |",
 		} {
 			if !strings.Contains(text, want) {
 				t.Errorf("API.md does not contain %q:\n%s", want, text)
@@ -225,12 +352,12 @@ func TestLoadDocsInDir(t *testing.T) {
 		dir := t.TempDir()
 		source := `package v1
 
-// TestAuthKind identifies an authentication method.
-type TestAuthKind string
+// testAuthKind identifies an authentication method.
+type testAuthKind string
 
 const (
-	// TestAuthKindOAuth uses OAuth credentials.
-	TestAuthKindOAuth TestAuthKind = "oauth"
+	// testAuthKindOAuth uses OAuth credentials.
+	testAuthKindOAuth testAuthKind = "oauth"
 )
 `
 		if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte(source), 0o600); err != nil {
@@ -240,10 +367,10 @@ const (
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := docs.typeDoc["TestAuthKind"]; got != "TestAuthKind identifies an authentication method." {
+		if got := docs.typeDoc["testAuthKind"]; got != "testAuthKind identifies an authentication method." {
 			t.Errorf("string alias doc = %q", got)
 		}
-		if got := docs.aliases[0].constants[0].doc; got != "TestAuthKindOAuth uses OAuth credentials." {
+		if got := docs.aliases[0].constants[0].doc; got != "testAuthKindOAuth uses OAuth credentials." {
 			t.Errorf("string alias value doc = %q", got)
 		}
 	})
@@ -260,8 +387,8 @@ func TestDocRegistryGenerateKotlinMCPClient(t *testing.T) {
 					Name:       "mcp",
 					Method:     "POST",
 					Path:       "",
-					Req:        reflect.TypeFor[TestJSONRPCRequest](),
-					Resp:       reflect.TypeFor[TestJSONRPCResponse](),
+					Req:        reflect.TypeFor[testJSONRPCRequest](),
+					Resp:       reflect.TypeFor[testJSONRPCResponse](),
 					HeadersArg: true,
 				},
 			},
@@ -304,11 +431,11 @@ func TestDocRegistryEmitKotlinStruct(t *testing.T) {
 
 		docs := &docRegistry[string]{}
 		var b strings.Builder
-		if err := docs.emitKotlinStruct(&b, reflect.TypeFor[TestPathOnlyRequest]()); err != nil {
+		if err := docs.emitKotlinStruct(&b, reflect.TypeFor[testPathOnlyRequest]()); err != nil {
 			t.Fatal(err)
 		}
 		got := b.String()
-		want := "@Serializable\nclass TestPathOnlyRequest\n"
+		want := "@Serializable\nclass testPathOnlyRequest\n"
 		if got != want {
 			t.Fatalf("emitKotlinStruct() = %q, want %q", got, want)
 		}
@@ -320,14 +447,14 @@ func TestDocRegistryEmitKotlinStruct(t *testing.T) {
 		docs := &docRegistry[string]{
 			cfg: &apispec.Config[string]{},
 			fieldDoc: map[string]map[string]string{
-				"TestKotlinDocumentedFields": {
+				"testKotlinDocumentedFields": {
 					"Name": "Name is the display name.",
 					"ID":   "ID is optional.",
 				},
 			},
 		}
 		var b strings.Builder
-		if err := docs.emitKotlinStruct(&b, reflect.TypeFor[TestKotlinDocumentedFields]()); err != nil {
+		if err := docs.emitKotlinStruct(&b, reflect.TypeFor[testKotlinDocumentedFields]()); err != nil {
 			t.Fatal(err)
 		}
 		got := b.String()
@@ -352,15 +479,15 @@ func TestDocRegistryGenerateTSNamedEvents(t *testing.T) {
 				{
 					Name:  "events",
 					Path:  "/events",
-					Resp:  reflect.TypeFor[TestSDKEvent](),
+					Resp:  reflect.TypeFor[testSDKEvent](),
 					IsSSE: true,
 					SSEEvents: []apispec.SSEEvent{
 						{Name: "ready", Handler: "onReady"},
 						{Name: "reset", Handler: "onReset"},
-						{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[TestSSEError]()},
+						{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[testSSEError]()},
 					},
 				},
-				{Name: "rawEvents", Path: "/raw-events", Resp: reflect.TypeFor[TestSDKEvent](), IsSSE: true},
+				{Name: "rawEvents", Path: "/raw-events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true},
 			},
 			ErrorModel: apispec.ClientErrorModel{TypeName: "DifferentError"},
 		},
@@ -374,19 +501,19 @@ func TestDocRegistryGenerateTSNamedEvents(t *testing.T) {
 	}
 	text := string(content)
 	for _, want := range []string{
-		"import type { DifferentError, TestSDKEvent, TestSSEError } from \"./types.gen\";",
+		"import type { DifferentError, testSDKEvent, testSSEError } from \"./types.gen\";",
 		"export interface EventsHandlers {",
 		"export interface RawEventsHandlers {",
-		"onMessage: (event: TestSDKEvent) => void;",
+		"onMessage: (event: testSDKEvent) => void;",
 		"onError: (err: unknown) => void;",
 		"onReady?: () => void;",
 		"onReset?: () => void;",
-		"onHistoryError?: (event: TestSSEError) => void;",
+		"onHistoryError?: (event: testSSEError) => void;",
 		"events: (handlers: EventsHandlers): EventSource => {",
 		"rawEvents: (handlers: RawEventsHandlers): EventSource => {",
-		"handlers.onMessage(validateTestSDKEvent(JSON.parse(e.data)));",
+		"handlers.onMessage(validatetestSDKEvent(JSON.parse(e.data)));",
 		"if (!(e instanceof MessageEvent) || typeof e.data !== \"string\") return;",
-		"handlers.onHistoryError?.(validateTestSSEError(JSON.parse(e.data)));",
+		"handlers.onHistoryError?.(validatetestSSEError(JSON.parse(e.data)));",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("api.gen.ts does not contain %q:\n%s", want, text)
@@ -400,7 +527,7 @@ func TestDocRegistryGenerateTSNamedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "`TestSDKEvent` SSE<br>Named events: `ready`, `reset`, `error` (`TestSSEError`)"
+	want := "`testSDKEvent` SSE<br>Named events: `ready`, `reset`, `error` (`testSSEError`)"
 	if !strings.Contains(string(content), want) {
 		t.Errorf("API.md does not contain %q:\n%s", want, content)
 	}
@@ -433,7 +560,7 @@ func TestDocRegistryGenerateTSValidate(t *testing.T) {
 		t.Parallel()
 
 		outDir := t.TempDir()
-		eventType := reflect.TypeFor[TestSDKEvent]()
+		eventType := reflect.TypeFor[testSDKEvent]()
 		docs := &docRegistry[string]{
 			cfg: &apispec.Config[string]{
 				Routes: []apispec.Route{{Name: "events", Resp: eventType, IsSSE: true}},
@@ -454,7 +581,7 @@ func TestDocRegistryGenerateTSValidate(t *testing.T) {
 		text := string(content)
 		for _, want := range []string{
 			"type ValidatorInput = unknown;",
-			"export function validateTestSDKEvent(raw: ValidatorInput): TestSDKEvent",
+			"export function validatetestSDKEvent(raw: ValidatorInput): testSDKEvent",
 		} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("validate.gen.ts does not contain %q:\n%s", want, text)

@@ -9,6 +9,14 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
+type testEmbeddedQueryFields struct {
+	Limit int `json:"limit" query:"limit"`
+}
+
+type testEmbeddedQueryRequest struct {
+	testEmbeddedQueryFields
+}
+
 func TestScopedQueryRequest(t *testing.T) {
 	type query struct {
 		Limit int  `json:"limit" query:"limit"`
@@ -20,7 +28,8 @@ func TestScopedQueryRequest(t *testing.T) {
 		QueryFromReq: true, QueryParams: []string{"limit", "unread_only"},
 	}
 	var b strings.Builder
-	if err := writeRouteTSJSONMethod(&route, &b, []string{"id"}); err != nil {
+	d := &docRegistry[string]{cfg: &apispec.Config[string]{}}
+	if err := writeRouteTSJSONMethod(d, &route, &b, []string{"id"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -38,8 +47,26 @@ func TestScopedQueryRequest(t *testing.T) {
 		t.Errorf("GET request must not send a JSON body: %s", b.String())
 	}
 	route.QueryParams = append(route.QueryParams, "missing")
-	if err := writeRouteTSJSONMethod(&route, &strings.Builder{}, []string{"id"}); err == nil {
+	if err := writeRouteTSJSONMethod(d, &route, &strings.Builder{}, []string{"id"}); err == nil {
 		t.Fatal("expected missing query field error")
+	}
+}
+
+func TestEmbeddedQueryRequest(t *testing.T) {
+	request := reflect.TypeFor[testEmbeddedQueryRequest]()
+	d := &docRegistry[string]{cfg: &apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{request.PkgPath(): {}},
+	}}
+	route := apispec.Route{
+		Name: "list", Method: "GET", Path: "/items",
+		Req: request, Resp: request, QueryFromReq: true, QueryParams: []string{"limit"},
+	}
+	var b strings.Builder
+	if err := writeRouteTSJSONMethod(d, &route, &b, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), `query.set("limit", String(req.limit))`) {
+		t.Fatalf("promoted query field not emitted: %s", b.String())
 	}
 }
 

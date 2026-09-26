@@ -19,9 +19,6 @@ type OutputConfig struct {
 	KotlinDir     string
 	SwiftDir      string
 	MarkdownDir   string
-
-	// TypeScriptClientOnly uses types.gen.ts supplied by the consumer.
-	TypeScriptClientOnly bool
 }
 
 // API describes one API surface to generate.
@@ -58,18 +55,14 @@ func generateAPI[C ~string](sourceDir string, output OutputConfig, config apispe
 	}
 
 	if output.TypeScriptDir != "" {
-		if !output.TypeScriptClientOnly {
-			if err := docs.generateTSTypes(output.TypeScriptDir); err != nil {
-				return err
-			}
+		if err := docs.generateTSTypes(output.TypeScriptDir); err != nil {
+			return err
 		}
 		if err := docs.generateTS(output.TypeScriptDir); err != nil {
 			return err
 		}
-		if !output.TypeScriptClientOnly {
-			if err := docs.generateTSValidate(output.TypeScriptDir); err != nil {
-				return err
-			}
+		if err := docs.generateTSValidate(output.TypeScriptDir); err != nil {
+			return err
 		}
 	}
 	if output.KotlinDir != "" {
