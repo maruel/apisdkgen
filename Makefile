@@ -19,11 +19,12 @@ fix:
 	@python3 scripts/update_agents_file_index.py
 
 verify: custom-gcl
+	@go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 	./custom-gcl config verify
 	./custom-gcl run ./...
 	go mod tidy -diff
 	go test -run '^$$' ./...
-	@files=$$(git ls-files '*.sh' 'scripts/hooks/*'); [ -z "$$files" ] || { out=$$(go tool shfmt -l $$files) || exit; [ -z "$$out" ] || { echo "Shell files need shfmt:" >&2; echo "$$out" >&2; exit 1; }; }
+	@files=$$(git ls-files '*.sh' 'scripts/hooks/*'); [ -z "$$files" ] || go tool shfmt -l $$files
 	@python3 scripts/lint_binaries.py
 	@python3 scripts/update_agents_file_index.py --check
 	@git diff --check
