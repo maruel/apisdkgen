@@ -1,6 +1,13 @@
 # Build, format, and test the standalone API SDK generator.
-.DEFAULT_GOAL := verify
-.PHONY: build custom-gcl fix git-hooks test verify
+.DEFAULT_GOAL := help
+.PHONY: build custom-gcl fix git-hooks help test verify
+
+help:
+	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
+	@printf '  %-14s - %s\n' 'make verify' 'Run the static checks'
+	@printf '  %-14s - %s\n' 'make test' 'Run Go tests'
+	@printf '  %-14s - %s\n' 'make fix' 'Format source and refresh the file index'
+	@printf '  %-14s - %s\n' 'make git-hooks' 'Install Git hooks'
 
 # The custom binary embeds two module plugins. Cache it by build inputs rather
 # than mtime: golangci-lint builds it in a fresh temporary module each time.
