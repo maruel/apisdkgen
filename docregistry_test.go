@@ -533,6 +533,23 @@ func TestDocRegistryGenerateTSNamedEvents(t *testing.T) {
 	}
 }
 
+type testEnvelopeKind string
+
+type testEnvelopeSource struct {
+	Agent string `json:"agent"`
+}
+
+type testEnvelopePayload struct {
+	Text string `json:"text"`
+}
+
+type testEnvelope struct {
+	Kind   testEnvelopeKind     `json:"kind"`
+	Source testEnvelopeSource   `json:"source,omitzero"`
+	Label  *string              `json:"label,omitempty"`
+	Text   *testEnvelopePayload `json:"text,omitempty"`
+}
+
 func TestDocRegistryGenerateTSValidate(t *testing.T) {
 	t.Parallel()
 
@@ -585,6 +602,69 @@ func TestDocRegistryGenerateTSValidate(t *testing.T) {
 		} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("validate.gen.ts does not contain %q:\n%s", want, text)
+			}
+		}
+	})
+
+	t.Run("discriminated common fields", func(t *testing.T) {
+		t.Parallel()
+		d := &docRegistry[string]{
+			cfg: &apispec.Config[string]{
+				Routes:          []apispec.Route{{Name: "events", Resp: reflect.TypeFor[testEnvelope](), IsSSE: true}},
+				SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEnvelope]().PkgPath(): {}},
+				Discriminated:   []string{"testEnvelope"},
+			},
+			aliases:    []aliasInfo{{name: "testEnvelopeKind", constants: []aliasConstant{{name: "Text", value: "text"}}}},
+			aliasNames: map[string]struct{}{"testEnvelopeKind": {}},
+		}
+		dir := t.TempDir()
+		if err := d.generateTSValidate(dir); err != nil {
+			t.Fatal(err)
+		}
+		data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), `case "source":`) || strings.Contains(string(data), `case "label":`) {
+			t.Fatalf("common fields became variants:\n%s", data)
+		}
+		common, variants, ok := strings.Cut(string(data), "  switch (result.kind) {\n")
+		if !ok {
+			t.Fatalf("missing discriminator dispatch:\n%s", data)
+		}
+		for _, want := range []string{
+			`source: (obj["source"] === undefined || obj["source"] === null ? undefined : validatetestEnvelopeSource(obj["source"])),`,
+			`label: (obj["label"] === undefined || obj["label"] === null ? undefined : asString(obj["label"], "testEnvelope.label")),`,
+			`agent: asString(obj["agent"], "testEnvelopeSource.agent"),`,
+		} {
+			if !strings.Contains(common, want) {
+				t.Errorf("common metadata validation is missing %q:\n%s", want, common)
+			}
+		}
+		// The selected variant must validate its payload without an optional guard.
+		want := "    case \"text\":\n      result.text = validatetestEnvelopePayload(obj[\"text\"]);\n      break;"
+		if !strings.Contains(variants, want) {
+			t.Errorf("required variant payload validation is missing %q:\n%s", want, variants)
+		}
+	})
+	t.Run("discriminated without enum", func(t *testing.T) {
+		t.Parallel()
+		d := &docRegistry[string]{cfg: &apispec.Config[string]{
+			Routes:          []apispec.Route{{Name: "events", Resp: reflect.TypeFor[testEnvelope](), IsSSE: true}},
+			Discriminated:   []string{"testEnvelope"},
+			SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEnvelope]().PkgPath(): {}},
+		}}
+		dir := t.TempDir()
+		if err := d.generateTSValidate(dir); err != nil {
+			t.Fatal(err)
+		}
+		data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"label", "source", "text"} {
+			if !strings.Contains(string(data), `case "`+field+`":`) {
+				t.Errorf("missing variant %s in %s", field, string(data))
 			}
 		}
 	})

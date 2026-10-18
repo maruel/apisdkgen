@@ -36,8 +36,12 @@ type Config[C ~string] struct {
 	MCPProtocolVersion string
 	SectionComments    map[string]string
 	SpecialTypes       []SpecialType
-	Discriminated      []string // Type names using kind-based dispatch in TS validators
-	ErrorCodes         []ErrorCodeSpec[C]
+	// Discriminated names types using kind-based dispatch in TS validators.
+	// If kind has known string enum values, matching optional JSON fields are
+	// required variant payloads; other fields are common metadata. Without enum
+	// values, all optional fields are treated as variant payloads.
+	Discriminated []string
+	ErrorCodes    []ErrorCodeSpec[C]
 }
 
 // ErrorCodeSpec describes an API error code for docs and generated constants.

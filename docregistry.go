@@ -856,16 +856,17 @@ func (d *docRegistry[C]) tsFieldOptValidator(t reflect.Type, pathExpr, pathLit s
 }
 
 // emitTSDiscriminator writes a discriminated union validator with a kind-based
-// dispatch. Fields without omitempty are base fields extracted before the switch
-// (except "kind", which is always the discriminator). Fields with omitempty or
-// pointer types are variant fields dispatched by their json name.
+// dispatch. When kind has known enum values, optional fields whose JSON names
+// match those values are required variant payloads; other fields are common
+// metadata. Without enum values, all optional fields are treated as variants.
 func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type) error {
 	name := t.Name()
 	fmt.Fprintf(b, "export function validate%s(raw: ValidatorInput): %s {\n", name, name)
 	fmt.Fprintf(b, "  const obj = asObject(raw, %q);\n", name)
 
-	// Collect base fields (non-pointer, no omitempty, not "kind").
+	// Read discriminator values from the same enum metadata emitted in the SDK.
 	var kindExpr string
+	var kinds []string
 	fields, err := d.jsonFields(t)
 	if err != nil {
 		return err
@@ -879,6 +880,14 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 				expr = "(" + expr + " as " + sf.Type.Name() + ")"
 			}
 			kindExpr = expr
+			for _, a := range d.aliases {
+				if a.name == sf.Type.Name() {
+					for _, c := range a.constants {
+						kinds = append(kinds, c.value)
+					}
+					break
+				}
+			}
 			break
 		}
 	}
@@ -906,8 +915,14 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
-		if !omit && !isPtr {
-			// Base field: extracted before the switch.
+		if (!omit && !isPtr) || (len(kinds) != 0 && !slices.Contains(kinds, jsonName)) {
+			// Common metadata keeps its declared optionality.
+			if omit || isPtr {
+				expr, err = d.tsFieldOptValidator(sf.Type, pathExpr, pathLit)
+				if err != nil {
+					return fmt.Errorf("%s.%s: %w", name, jsonName, err)
+				}
+			}
 			baseFields = append(baseFields, tsFieldBinding{jsonName, expr})
 		} else {
 			// Variant field: extracted in the switch.
