@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -13,6 +14,51 @@ import (
 
 	"github.com/maruel/apisdkgen/apispec"
 )
+
+func TestDocRegistryGenerateTSEmptyClient(t *testing.T) {
+	t.Parallel()
+	_, err := exec.LookPath("tsc")
+	if err != nil {
+		t.Skip("TypeScript compiler is not installed")
+	}
+	for _, tc := range []struct {
+		name       string
+		typedError bool
+	}{
+		{name: "string error code"},
+		{name: "typed error code", typedError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := apispec.Config[testGeneratedErrorCode]{
+				SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testGeneratedErrorResponse]().PkgPath(): {}},
+				ExtraSeeds:      []reflect.Type{reflect.TypeFor[testGeneratedErrorResponse]()},
+				ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse"},
+			}
+			if tc.typedError {
+				cfg.ErrorCodes = []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: testGeneratedCodeUnknown, Status: 500}}
+			}
+			dir := t.TempDir()
+			api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+			if err := Generate(&api); err != nil {
+				t.Fatal(err)
+			}
+			consumer := `import { APIError, createApiClient } from "./api.gen";
+const client = createApiClient(async () => new Response("{}"));
+console.log(client, new APIError(500, "UNKNOWN"));
+`
+			path := filepath.Join(dir, "consumer.ts")
+			if err := os.WriteFile(path, []byte(consumer), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(t.Context(), "tsc", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "consumer.ts")
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("strict consumer compilation failed: %v\n%s", err, out)
+			}
+		})
+	}
+}
 
 type testJSONRPCRequest struct{}
 
@@ -261,7 +307,7 @@ func TestDocRegistryGenerateTSTypes(t *testing.T) {
 				"code: testGeneratedErrorCode;",
 			}},
 			{dir: tsDir, name: "api.gen.ts", wants: []string{
-				"import type { testGeneratedErrorCode, testGeneratedErrorResponse } from \"./types.gen\";",
+				"import type { testGeneratedErrorCode } from \"./types.gen\";",
 				"public code: testGeneratedErrorCode,",
 			}},
 			{dir: kotlinDir, name: "Types.kt", wants: []string{
