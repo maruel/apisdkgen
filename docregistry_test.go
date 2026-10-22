@@ -19,7 +19,7 @@ func TestDocRegistryGenerateTSEmptyClient(t *testing.T) {
 	t.Parallel()
 	_, err := exec.LookPath("tsc")
 	if err != nil {
-		t.Skip("TypeScript compiler is not installed")
+		t.Fatalf("TypeScript compiler is required: %v", err)
 	}
 	for _, tc := range []struct {
 		name       string
