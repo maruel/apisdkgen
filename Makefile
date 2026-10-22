@@ -1,11 +1,10 @@
-# Build, format, and test the standalone API SDK generator.
+# Format, verify, and test the standalone API SDK generator.
 .DEFAULT_GOAL := help
-.PHONY: build custom-gcl fix git-hooks help test verify
+.PHONY: custom-gcl fix git-hooks help test verify
 
 help:
-	@printf '  %-14s - %s\n' 'make build' 'Build all Go packages'
 	@printf '  %-14s - %s\n' 'make verify' 'Run the static checks'
-	@printf '  %-14s - %s\n' 'make test' 'Run Go tests'
+	@printf '  %-14s - %s\n' 'make test' 'Run Go and generated TypeScript tests (requires tsc)'
 	@printf '  %-14s - %s\n' 'make fix' 'Format source and refresh the file index'
 	@printf '  %-14s - %s\n' 'make git-hooks' 'Install Git hooks'
 
@@ -35,9 +34,6 @@ verify: custom-gcl
 	@python3 scripts/lint_binaries.py
 	@python3 scripts/update_agents_file_index.py --check
 	@git diff --check
-
-build:
-	go build ./...
 
 test:
 	go test ./...

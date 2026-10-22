@@ -19,8 +19,6 @@ jobs:
           node-version: "26.9.0"
       - name: Install TypeScript compiler
         run: npm install --global --ignore-scripts typescript@6.0.3
-      - name: Build
-        run: make build
       - name: Verify
         run: make verify
       - name: Test
