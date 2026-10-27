@@ -140,11 +140,11 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
-	args := make([]string, 0, len(params)+1)
-	for _, p := range params {
+	args := make([]string, 0, len(params)+len(r.QueryParams)+1)
+	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": string")
 	}
-	tsPath := buildTSPath(r.Path, params, nil)
+	tsPath := buildTSPath(r.Path, params, r.QueryParams)
 	respName := routeRespName(r)
 	validatorName := "validate" + respName
 	args = append(args, "handlers: "+routeTSSSEHandlersName(r))
@@ -224,13 +224,45 @@ func writeRouteKotlinSSEFunc(r *apispec.Route, b *strings.Builder, params []stri
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
-	args := make([]string, 0, len(params))
-	for _, p := range params {
+	args := make([]string, 0, len(params)+len(r.QueryParams))
+	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": String")
 	}
-	ktPath := buildKotlinPath(r.Path, nil)
+	args = append(args, routeKotlinSSECallbackArgs(r)...)
+	ktPath := buildKotlinPath(r.Path, r.QueryParams)
 	respName := routeRespName(r)
+	if len(r.SSEEvents) != 0 {
+		fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = namedSSEFlow(%s, lastEventID, onEventID) { type, data ->\n", r.Name, strings.Join(args, ", "), respName, ktPath)
+		b.WriteString("        when (type) {\n")
+		fmt.Fprintf(b, "            \"message\" -> json.decodeFromString<%s>(data)\n", respName)
+		for _, e := range r.SSEEvents {
+			fmt.Fprintf(b, "            %q -> { ", e.Name)
+			if e.Resp == nil {
+				fmt.Fprintf(b, "%s?.invoke()", e.Handler)
+			} else {
+				fmt.Fprintf(b, "val payload = json.decodeFromString<%s>(data); %s?.invoke(payload)", e.Resp.Name(), e.Handler)
+			}
+			b.WriteString("; null }\n")
+		}
+		b.WriteString("            else -> null\n        }\n    }\n")
+		return
+	}
 	fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = sseFlow<%s>(%s)\n", r.Name, strings.Join(args, ", "), respName, respName, ktPath)
+}
+
+func routeKotlinSSECallbackArgs(r *apispec.Route) []string {
+	if len(r.SSEEvents) == 0 {
+		return nil
+	}
+	var args []string
+	for _, e := range r.SSEEvents {
+		typ := ""
+		if e.Resp != nil {
+			typ = e.Resp.Name()
+		}
+		args = append(args, e.Handler+": (("+typ+") -> Unit)? = null")
+	}
+	return append(args, "lastEventID: String? = null", "onEventID: ((String) -> Unit)? = null")
 }
 
 func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, params []string) {
@@ -246,6 +278,15 @@ func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, para
 	for _, p := range allParams {
 		args = append(args, p+": String")
 		callArgs = append(callArgs, p)
+	}
+	args = append(args, routeKotlinSSECallbackArgs(r)...)
+	if len(r.SSEEvents) != 0 {
+		for _, e := range r.SSEEvents {
+			callArgs = append(callArgs, e.Handler+" = "+e.Handler)
+		}
+		callArgs = append(callArgs, "lastEventID = resumeID.get()", "onEventID = { resumeID.set(it); onEventID?.invoke(it) }")
+		fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = flow {\n        val resumeID = java.util.concurrent.atomic.AtomicReference<String?>(lastEventID)\n        reconnectingNamedFlow { %s(%s) }.collect { emit(it) }\n    }\n", reconnectName, strings.Join(args, ", "), routeRespName(r), r.Name, strings.Join(callArgs, ", "))
+		return
 	}
 
 	fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = reconnectingFlow { %s(%s) }\n",
@@ -294,15 +335,45 @@ func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []strin
 	if r.Doc != "" {
 		b.WriteString(formatSwiftDoc(r.Doc, "    "))
 	}
-	args := make([]string, 0, len(params))
-	for _, p := range params {
+	args := make([]string, 0, len(params)+len(r.QueryParams))
+	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": String")
 	}
-	swiftPath := buildSwiftPath(r.Path, nil)
+	args = append(args, routeSwiftSSECallbackArgs(r)...)
+	swiftPath := buildSwiftPath(r.Path, r.QueryParams)
 	respName := routeRespName(r)
 	fmt.Fprintf(b, "    public func %s(%s) -> AsyncThrowingStream<%s, Error> {\n", r.Name, strings.Join(args, ", "), respName)
+	if len(r.SSEEvents) != 0 {
+		fmt.Fprintf(b, "        namedSSEStream(path: %s, lastEventID: lastEventID, onEventID: onEventID) { type, data in\n            switch type {\n            case \"message\": return try self.decoder.decode(%s.self, from: data)\n", swiftPath, respName)
+		for _, e := range r.SSEEvents {
+			fmt.Fprintf(b, "            case %q: ", e.Name)
+			if e.Resp == nil {
+				fmt.Fprintf(b, "%s?()", e.Handler)
+			} else {
+				fmt.Fprintf(b, "let payload = try self.decoder.decode(%s.self, from: data); %s?(payload)", e.Resp.Name(), e.Handler)
+			}
+			b.WriteString("; return nil\n")
+		}
+		b.WriteString("            default: return nil\n            }\n        }\n    }\n")
+		return
+	}
 	fmt.Fprintf(b, "        sseStream(path: %s)\n", swiftPath)
 	b.WriteString("    }\n")
+}
+
+func routeSwiftSSECallbackArgs(r *apispec.Route) []string {
+	if len(r.SSEEvents) == 0 {
+		return nil
+	}
+	var args []string
+	for _, e := range r.SSEEvents {
+		typ := ""
+		if e.Resp != nil {
+			typ = e.Resp.Name()
+		}
+		args = append(args, e.Handler+": (("+typ+") -> Void)? = nil")
+	}
+	return append(args, "lastEventID: String? = nil", "onEventID: ((String) -> Void)? = nil")
 }
 
 func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, params []string) {
@@ -313,19 +384,30 @@ func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, param
 		args = append(args, p+": String")
 		callArgs = append(callArgs, p+": "+p)
 	}
+	args = append(args, routeSwiftSSECallbackArgs(r)...)
 	reconnectName := r.Name + "Reconnecting"
 	respName := routeRespName(r)
 	fmt.Fprintf(b, "    public func %s(%s) -> AsyncThrowingStream<%s, Error> {\n",
 		reconnectName, strings.Join(args, ", "), respName)
+	if len(r.SSEEvents) != 0 {
+		for _, e := range r.SSEEvents {
+			callArgs = append(callArgs, e.Handler+": "+e.Handler)
+		}
+		callArgs = append(callArgs, "lastEventID: resumeID.get()", "onEventID: { resumeID.set($0); onEventID?($0) }")
+		b.WriteString("        let resumeID = SSECursor(lastEventID)\n")
+		fmt.Fprintf(b, "        return namedReconnectingStream { self.%s(%s) }\n    }\n", r.Name, strings.Join(callArgs, ", "))
+		return
+	}
 	fmt.Fprintf(b, "        reconnectingStream { self.%s(%s) }\n", r.Name, strings.Join(callArgs, ", "))
 	b.WriteString("    }\n")
 }
 
 // buildKotlinPath returns a Kotlin string expression for the path. Uses string
-// templates for paths with parameters and appends query params if any.
+// templates for paths with parameters and appends URL-encoded query values.
 func buildKotlinPath(path string, queryParams []string) string {
 	var b strings.Builder
-	b.WriteString(pathParamRe.ReplaceAllStringFunc(path, func(match string) string {
+	quoted := fmt.Sprintf("%q", path)
+	b.WriteString(pathParamRe.ReplaceAllStringFunc(quoted[1:len(quoted)-1], func(match string) string {
 		name := match[1 : len(match)-1]
 		return "$" + name
 	}))
@@ -336,10 +418,11 @@ func buildKotlinPath(path string, queryParams []string) string {
 			b.WriteByte('&')
 		}
 		b.WriteString(q)
-		b.WriteString("=$")
+		b.WriteString("=${java.net.URLEncoder.encode(")
 		b.WriteString(q)
+		b.WriteString(", \"UTF-8\")}")
 	}
-	return fmt.Sprintf("%q", b.String())
+	return "\"" + b.String() + "\""
 }
 
 // buildTSPath returns either a quoted string or a template literal for paths
@@ -383,7 +466,7 @@ func buildSwiftPath(path string, queryParams []string) string {
 		} else {
 			b.WriteByte('&')
 		}
-		b.WriteString(q + "=\\(" + q + ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? " + q + ")")
+		b.WriteString(q + "=\\(" + q + ".addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~\")) ?? \"\")")
 	}
 	return "\"" + b.String() + "\""
 }

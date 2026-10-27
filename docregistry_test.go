@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -71,6 +72,19 @@ type testSDKEvent struct {
 
 type testSSEError struct {
 	Message string `json:"message"`
+}
+
+type testSSECheckpoint struct {
+	Cursor string `json:"cursor"`
+}
+
+type testSSEReset struct {
+	BootstrapURL string `json:"bootstrapURL"`
+}
+
+// Task reproduces API DTO names colliding with Swift's concurrency type.
+type Task struct {
+	ID string `json:"id"`
 }
 
 type testPathOnlyRequest struct {
@@ -576,6 +590,183 @@ func TestDocRegistryGenerateTSNamedEvents(t *testing.T) {
 	want := "`testSDKEvent` SSE<br>Named events: `ready`, `reset`, `error` (`testSSEError`)"
 	if !strings.Contains(string(content), want) {
 		t.Errorf("API.md does not contain %q:\n%s", want, content)
+	}
+}
+
+func TestDocRegistryGenerateTSSSEQueryRuntime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	eventType := reflect.TypeFor[testSDKEvent]()
+	cfg := apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{eventType.PkgPath(): {}},
+		ExtraSeeds:      []reflect.Type{reflect.TypeFor[testGeneratedErrorResponse]()},
+		ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse", TSDetailsExpr: "undefined"},
+		ClientScopes:    []apispec.ClientScope{{Name: "workspace", PathPrefix: "/workspaces/{wsID}", Parameter: "wsID"}},
+		Routes: []apispec.Route{
+			{Name: "events", Path: "/workspaces/{wsID}/items/{id}/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor", "filter"}, SSEEvents: []apispec.SSEEvent{
+				{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
+				{Name: "stats", Handler: "onStats", Resp: eventType},
+				{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
+				{Name: "ready", Handler: "onReady"},
+				{Name: "failure", Handler: "onFailure", Resp: reflect.TypeFor[testSSEError]()},
+			}},
+			{Name: "rootEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}},
+			{Name: "rawEvents", Path: "/raw-events", Resp: eventType, IsSSE: true},
+		},
+	}
+	api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+	if err := Generate(&api); err != nil {
+		t.Fatal(err)
+	}
+	consumer := `import { createApiClient } from "./api.gen";
+class Source extends EventTarget {
+  constructor(readonly url: string) { super(); }
+}
+
+globalThis.EventSource = Source as unknown as typeof EventSource;
+function check(ok: boolean): void { if (!ok) throw new Error("SSE contract failed"); }
+const client = createApiClient(async () => { throw new Error("unexpected JSON request"); });
+const value = "a +&=/#?%雪";
+let messages = 0, ready = 0, failures = 0, errors = 0;
+const controls: string[] = [];
+const handlers = {
+  onMessage: (event: { kind: string }) => { check(event.kind === "update"); messages++; controls.push("message"); },
+  onCheckpoint: (event: { cursor: string }) => { check(event.cursor === "next"); controls.push("checkpoint"); },
+  onStats: (event: { kind: string }) => { check(event.kind === "stats"); controls.push("stats"); },
+  onReset: (event: { bootstrapURL: string }) => { check(event.bootstrapURL === "/bootstrap"); controls.push("reset"); },
+  onReady: () => { ready++; },
+  onFailure: (event: { message: string }) => { check(event.message === "expired"); failures++; },
+  onError: (_error: unknown) => { errors++; },
+};
+const source = client.workspace(value).events(value, value, "", handlers);
+check(source instanceof Source);
+const url = new URL(source.url, "https://example.test");
+check(url.pathname === "/workspaces/" + encodeURIComponent(value) + "/items/" + encodeURIComponent(value) + "/events");
+check(url.searchParams.get("cursor") === value && url.searchParams.get("filter") === "");
+check(url.searchParams.size === 2 && url.hash === "");
+source.dispatchEvent(new MessageEvent("checkpoint", { data: JSON.stringify({cursor: "next"}), lastEventId: "next" }));
+source.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({kind: "update"}) }));
+source.dispatchEvent(new MessageEvent("stats", { data: JSON.stringify({kind: "stats"}) }));
+source.dispatchEvent(new MessageEvent("reset", { data: JSON.stringify({bootstrapURL: "/bootstrap"}) }));
+source.dispatchEvent(new Event("ready"));
+source.dispatchEvent(new MessageEvent("failure", { data: JSON.stringify({message: "expired"}) }));
+source.dispatchEvent(new MessageEvent("message", { data: "not JSON" }));
+check(messages === 1 && ready === 1 && failures === 1 && errors === 1);
+check(controls.join(",") === "checkpoint,message,stats,reset");
+check(new URL(client.rootEvents(value, handlers).url, "https://example.test").searchParams.get("cursor") === value);
+check(client.rootEvents("", handlers).url === "/events?cursor=");
+check(client.rawEvents(handlers).url === "/raw-events");
+// @ts-expect-error A configured scalar query argument is required.
+if (false) client.rootEvents(handlers);
+// @ts-expect-error Queries do not add arguments to routes without QueryParams.
+if (false) client.rawEvents("", handlers);
+`
+	if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(consumer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []*exec.Cmd{
+		exec.CommandContext(t.Context(), "tsc", "--strict", "--target", "ES2022", "--module", "commonjs", "consumer.ts"),
+		exec.CommandContext(t.Context(), "node", "consumer.js"),
+	} {
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s failed: %v\n%s", cmd.Path, err, out)
+		}
+	}
+}
+
+func TestDocRegistryGenerateKotlinSSERuntime(t *testing.T) {
+	// Optional native execution uses the caller's installed Kotlin compiler and
+	// OkHttp, Okio, coroutine and serialization jars. The normal suite always
+	// checks the emitted native API even when these dependencies are absent.
+	cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+	if cp == "" {
+		t.Skip("set APISDKGEN_KOTLIN_CLASSPATH to run the generated Kotlin HTTP regression")
+	}
+	_, err := exec.LookPath("kotlinc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin := os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN")
+	if plugin == "" {
+		t.Fatal("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN is required")
+	}
+	dir := t.TempDir()
+	eventType := reflect.TypeFor[testSDKEvent]()
+	cfg := apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{eventType.PkgPath(): {}},
+		KotlinPackage:   "nativecheck",
+		ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError", KTCodeExpr: `"UNKNOWN"`, KTMessageExpr: "err.message", KTDetailsExpr: "null"},
+		Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
+			{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
+			{Name: "stats", Handler: "onStats", Resp: eventType},
+			{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
+			{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[testSSEError]()},
+			{Name: "ready", Handler: "onReady"},
+		}}},
+	}
+	api := NewAPI(".", OutputConfig{KotlinDir: dir}, cfg)
+	if err := Generate(&api); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := filepath.Abs("testdata/SSEStreamTest.kt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar := filepath.Join(dir, "runtime.jar")
+	// These executables and compiler flags are fixed; only the locally installed
+	// dependency paths and generated temporary files vary.
+	// #nosec G204 G702 -- Local developer-supplied compiler dependencies are intentional test inputs; no shell is used.
+	cmd := exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+plugin, filepath.Join(dir, "ApiClient.kt"), filepath.Join(dir, "Types.kt"), fixture, "-include-runtime", "-d", jar)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Kotlin compilation failed: %v\n%s", err, out)
+	}
+	// #nosec G204 G702 -- Run the generated test jar with the same trusted local dependency classpath, without a shell.
+	cmd = exec.CommandContext(t.Context(), "java", "-cp", jar+string(os.PathListSeparator)+cp, "nativecheck.SSEStreamTestKt")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Kotlin HTTP runtime failed: %v\n%s", err, out)
+	}
+}
+
+func TestDocRegistryGenerateSwiftSSERuntime(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fixture supplies the Linux FoundationNetworking byte transport")
+	}
+	if _, err := exec.LookPath("swiftc"); err != nil {
+		t.Skip("Swift compiler is optional")
+	}
+	dir := t.TempDir()
+	eventType := reflect.TypeFor[testSDKEvent]()
+	cfg := apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{eventType.PkgPath(): {}},
+		ExtraSeeds:      []reflect.Type{reflect.TypeFor[Task]()},
+		ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError", SwiftCodeExpr: `"UNKNOWN"`, SwiftMessageExpr: "errResp.message", SwiftDetailsExpr: "nil"},
+		Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
+			{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
+			{Name: "stats", Handler: "onStats", Resp: eventType},
+			{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
+			{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[testSSEError]()},
+			{Name: "ready", Handler: "onReady"},
+		}}},
+	}
+	api := NewAPI(".", OutputConfig{SwiftDir: dir}, cfg)
+	if err := Generate(&api); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := filepath.Abs("testdata/SSEStreamTest.swift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "runtime")
+	// #nosec G204 -- Fixed compiler and flags consume only generated temporary files and the repository fixture.
+	cmd := exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", filepath.Join(dir, "ApiClient.swift"), filepath.Join(dir, "Types.swift"), fixture, "-o", binary)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Swift compilation failed: %v\n%s", err, out)
+	}
+	// #nosec G204 -- Execute only the test binary compiled above in this test's private temporary directory.
+	cmd = exec.CommandContext(t.Context(), binary)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Swift runtime failed: %v\n%s", err, out)
 	}
 }
 
