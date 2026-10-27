@@ -635,9 +635,17 @@ func TestGenerate(t *testing.T) {
 
 		errorResponseType := reflect.TypeFor[testGeneratedErrorResponse]()
 		cfg := apispec.Config[testGeneratedErrorCode]{
+			Routes: []apispec.Route{{
+				Name: "getEvent", Method: "GET", Path: "/event", Resp: reflect.TypeFor[testSDKEvent](),
+			}},
 			SDKPackagePaths: map[string]struct{}{errorResponseType.PkgPath(): {}},
 			ExtraSeeds:      []reflect.Type{errorResponseType},
-			ErrorModel:      apispec.ClientErrorModel{TypeName: errorResponseType.Name()},
+			KotlinPackage:   "fixture.api",
+			ErrorModel: apispec.ClientErrorModel{
+				TypeName:      errorResponseType.Name(),
+				TSDetailsExpr: "undefined",
+				KTDetailsExpr: "null",
+			},
 			ErrorCodes: []apispec.ErrorCodeSpec[testGeneratedErrorCode]{
 				{Code: testGeneratedCodeBadRequest, Status: 400},
 				{Code: testGeneratedCodeUnknown, Status: 500},
@@ -668,6 +676,50 @@ func TestGenerate(t *testing.T) {
 				assertGolden(t, file.name, string(data))
 			})
 		}
+		t.Run("compile", func(t *testing.T) {
+			t.Run("TypeScript", func(t *testing.T) {
+				cmd := exec.CommandContext(t.Context(), "tsc", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "api.gen.ts", "types.gen.ts")
+				cmd.Dir = tsDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("TypeScript fixture compilation failed: %v\n%s", err, out)
+				}
+			})
+			t.Run("Kotlin", func(t *testing.T) {
+				cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+				if cp == "" {
+					t.Skip("run make test to configure Kotlin dependencies")
+				}
+				plugin := os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN")
+				if plugin == "" {
+					t.Fatal("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN is required")
+				}
+				// #nosec G204 G702 -- Compiler paths are generated temporary files and explicitly configured local dependencies; no shell is used.
+				cmd := exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+plugin, "ApiClient.kt", "Types.kt", "-d", "fixture.jar")
+				cmd.Dir = kotlinDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("Kotlin fixture compilation failed: %v\n%s", err, out)
+				}
+			})
+			t.Run("Swift", func(t *testing.T) {
+				if _, err := exec.LookPath("swiftc"); err != nil {
+					t.Skip("Swift compiler is optional")
+				}
+				args := []string{"-swift-version", "5", "-parse-as-library", "-emit-library", "ApiClient.swift", "Types.swift", "-o", "fixture.so"}
+				if runtime.GOOS == "linux" {
+					transport, err := filepath.Abs("testdata/SSETransport.swift")
+					if err != nil {
+						t.Fatal(err)
+					}
+					args = append(args, transport)
+				}
+				// #nosec G204 -- Fixed compiler flags consume generated source and the repository's Linux transport fixture.
+				cmd := exec.CommandContext(t.Context(), "swiftc", args...)
+				cmd.Dir = swiftDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("Swift fixture compilation failed: %v\n%s", err, out)
+				}
+			})
+		})
 	})
 
 	t.Run("empty TypeScript client", func(t *testing.T) {
@@ -882,9 +934,14 @@ if (false) client.rawEvents("", handlers);
 		if err != nil {
 			t.Fatal(err)
 		}
+		transport, err := filepath.Abs("testdata/SSETransport.swift")
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		binary := filepath.Join(dir, "runtime")
 		// #nosec G204 -- Fixed compiler and flags consume only generated temporary files and the repository fixture.
-		cmd := exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", filepath.Join(dir, "ApiClient.swift"), filepath.Join(dir, "Types.swift"), fixture, "-o", binary)
+		cmd := exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", filepath.Join(dir, "ApiClient.swift"), filepath.Join(dir, "Types.swift"), transport, fixture, "-o", binary)
 		if !t.Run("compile", func(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("Swift compilation failed: %v\n%s", err, out)

@@ -303,6 +303,9 @@ public final class ApiClient {
     }
 
     // JSON endpoints
+    public func getEvent() async throws -> testSDKEvent {
+        try await request("GET", path: "/event")
+    }
 
     // SSE endpoints
 

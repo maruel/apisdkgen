@@ -20,6 +20,11 @@ export type testGeneratedErrorCode =
 export const testGeneratedErrorCodeBadRequest = "BAD_REQUEST";
 export const testGeneratedErrorCodeUnknown = "UNKNOWN";
 
+export interface testSDKEvent {
+  kind: string;
+  text?: string;
+}
+
 export interface testGeneratedErrorDetails {
   code: testGeneratedErrorCode;
   message: string;

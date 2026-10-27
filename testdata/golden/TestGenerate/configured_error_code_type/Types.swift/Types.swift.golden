@@ -96,6 +96,11 @@ public struct testGeneratedErrorCode: Codable, Equatable, Hashable {
     }
 }
 
+public struct testSDKEvent: Codable {
+    public let kind: String
+    public let text: String?
+}
+
 public struct testGeneratedErrorDetails: Codable {
     public let code: testGeneratedErrorCode
     public let message: String

@@ -23,8 +23,12 @@ Generated-output tests compare complete results with golden files in
 `testdata/golden`. To update expectations after an intentional output change:
 
 ```sh
-go test ./... -run 'Test(DocRegistry|Generate|WriteRoute)' -update
+make update-golden
 git diff -- testdata/golden
 ```
 
-Review the golden diff, then run `make test` without `-update`.
+Review the golden diff, then run `make test`.
+
+`make update-golden` uses the same installed compilers and runtime dependencies
+as `make test`. The complete typed-error SDK fixture compiles its generated
+TypeScript, Kotlin, and Swift clients and types alongside the golden comparisons.

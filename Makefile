@@ -1,11 +1,12 @@
 # Format, verify, and test the standalone API SDK generator.
 .DEFAULT_GOAL := help
-.PHONY: custom-gcl fix git-hooks help test test-deps verify
+.PHONY: custom-gcl fix git-hooks help test test-deps update-golden verify
 
 help:
 	@printf '  %-14s - %s\n' 'make verify' 'Run the static checks'
 	@printf '  %-14s - %s\n' 'make test' 'Run Go and generated TypeScript, Kotlin, and Swift tests'
 	@printf '  %-14s - %s\n' 'make test-deps' 'Install pinned SDK test dependencies'
+	@printf '  %-14s - %s\n' 'make update-golden' 'Regenerate golden expectations and run the tests'
 	@printf '  %-14s - %s\n' 'make fix' 'Format source and refresh the file index'
 	@printf '  %-14s - %s\n' 'make git-hooks' 'Install Git hooks'
 
@@ -39,7 +40,7 @@ verify: custom-gcl
 test-deps:
 	@./scripts/install-test-deps.sh
 
-test: test-deps
+test update-golden: test-deps
 	@set -eu; \
 	classpath=$$(printf '%s:' "$(CURDIR)"/.test-deps/jars/*.jar); \
 	PATH="$(CURDIR)/.test-deps/node_modules/.bin:$(CURDIR)/.test-deps/bin:$$PATH" \
@@ -48,7 +49,7 @@ test: test-deps
 	SWIFTLY_TOOLCHAINS_DIR="$(CURDIR)/.test-deps/swiftly/toolchains" \
 	APISDKGEN_KOTLIN_CLASSPATH="$${classpath%:}" \
 	APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN="$(CURDIR)/.test-deps/kotlin/lib/kotlinx-serialization-compiler-plugin.jar" \
-	go test -count=1 ./...
+	go test -count=1 ./... $(if $(filter update-golden,$@),-update)
 
 git-hooks:
 	@./scripts/install-git-hooks.sh
