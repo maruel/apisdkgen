@@ -13,6 +13,8 @@ output options.
 Run `make test-deps` to install pinned TypeScript, Kotlin, Swift (on Linux),
 and JVM libraries in the ignored `.test-deps` directory. The installer needs
 Java, Node/npm, curl, GnuPG, tar, and unzip. Swiftly reports any missing system libraries.
+On Ubuntu, install `libcurl4-openssl-dev` before running the installer;
+CI installs this package before `make test-deps`.
 `make test` installs missing dependencies, sets the compiler paths and Kotlin
 classpath, and runs the complete suite without the Go test cache. The Swift
 transport fixture runs on Linux.
