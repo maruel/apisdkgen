@@ -1,0 +1,7 @@
+@Serializable
+data class testKotlinDocumentedFields(
+    /** Name is the display name. */
+    val name: String,
+    /** ID is optional. */
+    val id: String? = null,
+)

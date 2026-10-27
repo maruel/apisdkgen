@@ -1,0 +1,11 @@
+    events: (id: string, cursor: string, filter: string, handlers: EventsHandlers): EventSource => {
+      const es = new EventSource(`/items/${encodeURIComponent(id)}/events?cursor=${encodeURIComponent(cursor)}&filter=${encodeURIComponent(filter)}`);
+      es.addEventListener("message", (e) => {
+        try {
+          handlers.onMessage(validatetestSDKEvent(JSON.parse(e.data)));
+        } catch (err) {
+          handlers.onError(err);
+        }
+      });
+      return es;
+    },

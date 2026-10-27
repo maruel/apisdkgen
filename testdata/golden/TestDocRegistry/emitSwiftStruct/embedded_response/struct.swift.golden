@@ -1,0 +1,5 @@
+public struct testTSEmbeddedResponse: Codable {
+    public let limit: Int
+    public let id: String
+    public let name: String
+}

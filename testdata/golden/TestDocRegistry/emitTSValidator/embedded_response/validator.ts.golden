@@ -1,0 +1,9 @@
+export function validatetestTSEmbeddedResponse(raw: ValidatorInput): testTSEmbeddedResponse {
+  const obj = asObject(raw, "testTSEmbeddedResponse");
+  return {
+    limit: asNumber(obj["limit"], "testTSEmbeddedResponse.limit"),
+    id: asString(obj["id"], "testTSEmbeddedResponse.id"),
+    name: asString(obj["name"], "testTSEmbeddedResponse.name"),
+  };
+}
+

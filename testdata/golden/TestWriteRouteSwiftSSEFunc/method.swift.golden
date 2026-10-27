@@ -1,0 +1,3 @@
+    public func events(id: String, cursor: String, filter: String) -> AsyncThrowingStream<testSDKEvent, Error> {
+        sseStream(path: "/items/\(id)/events?cursor=\(cursor.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? "")&filter=\(filter.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? "")")
+    }

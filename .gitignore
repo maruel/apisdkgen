@@ -1,4 +1,5 @@
 /.custom-gcl.sha
+/.test-deps/
 /custom-gcl
 /go.work
 /go.work.sum

@@ -1,0 +1,5 @@
+    list: (req: testEmbeddedQueryRequest): Promise<testEmbeddedQueryRequest> => {
+      const query = new URLSearchParams();
+      if (req.limit !== undefined && req.limit !== null) query.set("limit", String(req.limit));
+      return request<testEmbeddedQueryRequest>("GET", "/items" + (query.size ? `?${query}` : ""));
+    },

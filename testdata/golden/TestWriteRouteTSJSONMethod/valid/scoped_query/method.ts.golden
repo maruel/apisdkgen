@@ -1,0 +1,6 @@
+    list: (id: string, req: query): Promise<query> => {
+      const query = new URLSearchParams();
+      if (req.limit !== undefined && req.limit !== null) query.set("limit", String(req.limit));
+      if (req.unread_only !== undefined && req.unread_only !== null) query.set("unread_only", String(req.unread_only));
+      return request<query>("GET", `/api/v1/workspaces/${encodeURIComponent(wsID)}/items/${encodeURIComponent(id)}` + (query.size ? `?${query}` : ""));
+    },

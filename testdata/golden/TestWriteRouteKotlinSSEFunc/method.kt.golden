@@ -1,0 +1,1 @@
+    fun events(id: String, cursor: String, filter: String): Flow<testSDKEvent> = sseFlow<testSDKEvent>("/items/$id/events?cursor=${java.net.URLEncoder.encode(cursor, "UTF-8")}&filter=${java.net.URLEncoder.encode(filter, "UTF-8")}")

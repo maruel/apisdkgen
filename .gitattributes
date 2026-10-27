@@ -1,0 +1,2 @@
+# Preserve exact generated-output expectations, including whitespace.
+testdata/golden/** -whitespace
