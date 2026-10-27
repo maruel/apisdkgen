@@ -5,6 +5,7 @@ package apisdkgen
 import (
 	"errors"
 	"fmt"
+	"go/token"
 	"maps"
 	"os"
 	"path/filepath"
@@ -2372,15 +2373,6 @@ func fieldsNeedBlock(fields []kotlinField) bool {
 	return false
 }
 
-func extractPathParams(path string) []string {
-	matches := pathParamRe.FindAllStringSubmatch(path, -1)
-	out := make([]string, len(matches))
-	for i, m := range matches {
-		out[i] = m[1]
-	}
-	return out
-}
-
 // docGroupRoutes groups routes by categoryName(), preserving first-seen order.
 func docGroupRoutes(routes []apispec.Route) []docRouteGroup {
 	seen := map[string]int{} // category name → index in result
@@ -2419,24 +2411,6 @@ func swiftEscapeIdent(name string) string {
 		return "`" + name + "`"
 	}
 	return name
-}
-
-func isIdentifier(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if i == 0 {
-			if r != '_' && !unicode.IsLetter(r) {
-				return false
-			}
-			continue
-		}
-		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
 }
 
 // tsFieldBinding pairs a json field name with the TypeScript expression
@@ -2497,4 +2471,18 @@ func emitTSAlias(b *strings.Builder, a aliasInfo, open bool) {
 type sdkType struct {
 	Type    reflect.Type
 	comment string // Emitted as `// comment` before the struct.
+}
+
+func isIdentifier(name string) bool {
+	// SDK identifiers may use Go keywords, such as a JSON field named "type".
+	return token.IsIdentifier(name) || token.Lookup(name).IsKeyword()
+}
+
+func extractPathParams(path string) []string {
+	matches := pathParamRe.FindAllStringSubmatch(path, -1)
+	out := make([]string, len(matches))
+	for i, m := range matches {
+		out[i] = m[1]
+	}
+	return out
 }

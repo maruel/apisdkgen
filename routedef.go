@@ -3,6 +3,7 @@
 package apisdkgen
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -68,30 +69,14 @@ func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *s
 	}
 	tsPath := buildTSPath(r.Path, params, queryParams)
 	if r.QueryFromReq {
-		if r.Req == nil || r.Req.Kind() != reflect.Struct {
-			return fmt.Errorf("%s: query request must be a struct", r.Name)
+		fields, err := routeQueryFields(d, r)
+		if err != nil {
+			return fmt.Errorf("%s: %w", r.Name, err)
 		}
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => {\n", r.Name, strings.Join(args, ", "), respType)
 		b.WriteString("      const query = new URLSearchParams();\n")
-		fields, err := d.jsonFields(r.Req)
-		if err != nil {
-			return err
-		}
-		for _, q := range r.QueryParams {
-			field := ""
-			for _, f := range fields {
-				sf := f.field
-				if sf.Tag.Get("query") == q {
-					field = sf.Name
-					if name, _, _ := strings.Cut(sf.Tag.Get("json"), ","); name != "" && name != "-" {
-						field = name
-					}
-					break
-				}
-			}
-			if field == "" {
-				return fmt.Errorf("%s: missing query field %q", r.Name, q)
-			}
+		for i, q := range r.QueryParams {
+			field := fields[i]
 			fmt.Fprintf(b, "      if (req.%s !== undefined && req.%s !== null) query.set(%q, String(req.%s));\n", field, field, q, field)
 		}
 		fmt.Fprintf(b, "      return request<%s>(%q, %s + (query.size ? `?${query}` : \"\"));\n", respType, r.Method, tsPath)
@@ -469,4 +454,33 @@ func buildSwiftPath(path string, queryParams []string) string {
 		b.WriteString(q + "=\\(" + q + ".addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~\")) ?? \"\")")
 	}
 	return "\"" + b.String() + "\""
+}
+
+// routeQueryFields resolves query parameters to their emitted JSON field names.
+func routeQueryFields[C ~string](d *docRegistry[C], r *apispec.Route) ([]string, error) {
+	if r.Req == nil || r.Req.Kind() != reflect.Struct {
+		return nil, errors.New("query request must be a struct")
+	}
+	fields, err := d.jsonFields(r.Req)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(r.QueryParams))
+	for _, query := range r.QueryParams {
+		name := ""
+		for _, field := range fields {
+			if field.field.Tag.Get("query") == query {
+				name = field.field.Name
+				if jsonName, _, _ := strings.Cut(field.field.Tag.Get("json"), ","); jsonName != "" && jsonName != "-" {
+					name = jsonName
+				}
+				break
+			}
+		}
+		if name == "" {
+			return nil, fmt.Errorf("missing query field %q", query)
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
