@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"go/token"
 	"maps"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -146,7 +145,7 @@ func (d *docRegistry[C]) discoverKotlinStructs() []sdkType {
 	return result
 }
 
-func (d *docRegistry[C]) writeKotlinClient(outDir string) error {
+func (d *docRegistry[C]) writeKotlinClient(outDir string, out outputSink) error {
 	var b strings.Builder
 	errorModel := clientErrorModel(d.cfg)
 
@@ -495,7 +494,7 @@ class ApiClient(
 }
 `)
 
-	return os.WriteFile(filepath.Join(outDir, "ApiClient.kt"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "ApiClient.kt"), b.String())
 }
 
 // discoverSwiftStructs walks the API struct types reachable from route types
@@ -510,7 +509,7 @@ func (d *docRegistry[C]) discoverSwiftStructs() []sdkType {
 	return result
 }
 
-func (d *docRegistry[C]) writeSwiftClient(outDir string) error {
+func (d *docRegistry[C]) writeSwiftClient(outDir string, out outputSink) error {
 	var b strings.Builder
 	errorModel := clientErrorModel(d.cfg)
 
@@ -859,7 +858,7 @@ public final class ApiClient {
 	}
 	b.WriteString("}\n")
 
-	return os.WriteFile(filepath.Join(outDir, "ApiClient.swift"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "ApiClient.swift"), b.String())
 }
 
 // discoverTSStructs walks route types and ErrorResponse, and annotates
@@ -985,8 +984,8 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 }
 
 // generateTSTypes generates TypeScript DTO definitions from the Go DTO structs.
-func (d *docRegistry[C]) generateTSTypes(outDir string) error {
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+func (d *docRegistry[C]) generateTSTypes(outDir string, out outputSink) error {
+	if err := out.mkdir(outDir); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -1089,7 +1088,7 @@ func (d *docRegistry[C]) generateTSTypes(outDir string) error {
 		b.WriteString("\n")
 	}
 
-	return os.WriteFile(filepath.Join(outDir, "types.gen.ts"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "types.gen.ts"), b.String())
 }
 
 // tsFieldValidator returns a TypeScript expression that validates a value
@@ -1285,16 +1284,9 @@ func (d *docRegistry[C]) emitTSValidator(b *strings.Builder, t reflect.Type) err
 	return nil
 }
 
-func removeGeneratedFile(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
 // generateTSValidate generates TypeScript runtime validators for SSE DTO structs.
-func (d *docRegistry[C]) generateTSValidate(outDir string) error {
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+func (d *docRegistry[C]) generateTSValidate(outDir string, out outputSink) error {
+	if err := out.mkdir(outDir); err != nil {
 		return err
 	}
 
@@ -1306,7 +1298,7 @@ func (d *docRegistry[C]) generateTSValidate(outDir string) error {
 		if hasSSERoutes(d.cfg) {
 			return errors.New("SSE routes configured without reachable SSE DTO validators")
 		}
-		return removeGeneratedFile(filepath.Join(outDir, "validate.gen.ts"))
+		return out.remove(filepath.Join(outDir, "validate.gen.ts"))
 	}
 
 	var b strings.Builder
@@ -1418,12 +1410,12 @@ func (d *docRegistry[C]) generateTSValidate(outDir string) error {
 		}
 	}
 
-	return os.WriteFile(filepath.Join(outDir, "validate.gen.ts"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "validate.gen.ts"), b.String())
 }
 
 // generateTS generates the TypeScript API client as a createApiClient factory.
-func (d *docRegistry[C]) generateTS(outDir string) error {
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+func (d *docRegistry[C]) generateTS(outDir string, out outputSink) error {
+	if err := out.mkdir(outDir); err != nil {
 		return err
 	}
 	errorModel := clientErrorModel(d.cfg)
@@ -1589,7 +1581,7 @@ func (d *docRegistry[C]) generateTS(outDir string) error {
 	b.WriteString("  };\n")
 	b.WriteString("}\n\nexport type APIClient = ReturnType<typeof createApiClient>;\n")
 
-	return os.WriteFile(filepath.Join(outDir, "api.gen.ts"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "api.gen.ts"), b.String())
 }
 
 func routeClientScope(scopes []apispec.ClientScope, path string) *apispec.ClientScope {
@@ -1602,14 +1594,14 @@ func routeClientScope(scopes []apispec.ClientScope, path string) *apispec.Client
 }
 
 // generateKotlin generates Types.kt and ApiClient.kt in outDir.
-func (d *docRegistry[C]) generateKotlin(outDir string) error {
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+func (d *docRegistry[C]) generateKotlin(outDir string, out outputSink) error {
+	if err := out.mkdir(outDir); err != nil {
 		return err
 	}
-	if err := d.writeKotlinTypes(outDir); err != nil {
+	if err := d.writeKotlinTypes(outDir, out); err != nil {
 		return err
 	}
-	return d.writeKotlinClient(outDir)
+	return d.writeKotlinClient(outDir, out)
 }
 
 func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
@@ -1765,7 +1757,7 @@ func (d *docRegistry[C]) emitKotlinStruct(b *strings.Builder, t reflect.Type) er
 	return nil
 }
 
-func (d *docRegistry[C]) writeKotlinTypes(outDir string) error {
+func (d *docRegistry[C]) writeKotlinTypes(outDir string, out outputSink) error {
 	var b strings.Builder
 	b.WriteString("// Code generated by gen-api-sdk. DO NOT EDIT.\n")
 	b.WriteString("@file:UseSerializers(InstantSerializer::class)\n\n")
@@ -1847,11 +1839,11 @@ func (d *docRegistry[C]) writeKotlinTypes(outDir string) error {
 		b.WriteString("\n")
 	}
 
-	return os.WriteFile(filepath.Join(outDir, "Types.kt"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "Types.kt"), b.String())
 }
 
 // generateMarkdownDoc generates API.md from the route table.
-func (d *docRegistry[C]) generateMarkdownDoc(outDir string) error {
+func (d *docRegistry[C]) generateMarkdownDoc(outDir string, out outputSink) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", d.cfg.APIDocTitle)
 	b.WriteString("<!-- Code generated by gen-api-sdk; DO NOT EDIT. -->\n\n")
@@ -1935,7 +1927,7 @@ func (d *docRegistry[C]) generateMarkdownDoc(outDir string) error {
 		}
 	}
 
-	return os.WriteFile(filepath.Join(outDir, "API.md"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "API.md"), b.String())
 }
 
 func (d *docRegistry[C]) writeDocAlias(b *strings.Builder, a *aliasInfo) {
@@ -2098,7 +2090,7 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 	return nil
 }
 
-func (d *docRegistry[C]) writeSwiftTypes(outDir string) error {
+func (d *docRegistry[C]) writeSwiftTypes(outDir string, out outputSink) error {
 	var b strings.Builder
 	b.WriteString("// Code generated by gen-api-sdk. DO NOT EDIT.\nimport Foundation\n\n")
 	b.WriteString("/// ISO 8601 timestamp string (e.g. \"2026-04-13T12:00:00Z\").\n")
@@ -2194,18 +2186,18 @@ public enum JSONValue: Codable, Equatable {
 		b.WriteString("\n")
 	}
 
-	return os.WriteFile(filepath.Join(outDir, "Types.swift"), []byte(b.String()), 0o600)
+	return out.write(filepath.Join(outDir, "Types.swift"), b.String())
 }
 
 // generateSwift generates Types.swift and ApiClient.swift in outDir.
-func (d *docRegistry[C]) generateSwift(outDir string) error {
-	if err := os.MkdirAll(outDir, 0o750); err != nil {
+func (d *docRegistry[C]) generateSwift(outDir string, out outputSink) error {
+	if err := out.mkdir(outDir); err != nil {
 		return err
 	}
-	if err := d.writeSwiftTypes(outDir); err != nil {
+	if err := d.writeSwiftTypes(outDir, out); err != nil {
 		return err
 	}
-	return d.writeSwiftClient(outDir)
+	return d.writeSwiftClient(outDir, out)
 }
 
 type jsonField struct {

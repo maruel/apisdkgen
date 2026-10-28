@@ -333,7 +333,7 @@ func TestDocRegistry(t *testing.T) {
 					ErrorModel: apispec.ClientErrorModel{TypeName: "DifferentError"},
 				},
 			}
-			if err := docs.generateTS(outDir); err != nil {
+			if err := docs.generateTS(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			content, err := fs.ReadFile(os.DirFS(outDir), "api.gen.ts")
@@ -342,7 +342,7 @@ func TestDocRegistry(t *testing.T) {
 			}
 			assertGolden(t, "api.gen.ts", string(content))
 
-			if err := docs.generateMarkdownDoc(outDir); err != nil {
+			if err := docs.generateMarkdownDoc(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			content, err = fs.ReadFile(os.DirFS(outDir), "API.md")
@@ -379,7 +379,7 @@ func TestDocRegistry(t *testing.T) {
 					},
 				}},
 			}
-			if err := docs.generateMarkdownDoc(outDir); err != nil {
+			if err := docs.generateMarkdownDoc(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(outDir), "API.md")
@@ -416,7 +416,7 @@ func TestDocRegistry(t *testing.T) {
 					},
 				},
 			}
-			if err := docs.writeKotlinClient(outDir); err != nil {
+			if err := docs.writeKotlinClient(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			content, err := fs.ReadFile(os.DirFS(outDir), "ApiClient.kt")
@@ -434,7 +434,7 @@ func TestDocRegistry(t *testing.T) {
 				},
 			}}
 			dir := t.TempDir()
-			if err := d.writeKotlinClient(dir); err != nil {
+			if err := d.writeKotlinClient(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.kt")
@@ -453,7 +453,7 @@ func TestDocRegistry(t *testing.T) {
 			}}
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{KotlinPackage: "example.api", Routes: []apispec.Route{r}}}
 			dir := t.TempDir()
-			if err := d.writeKotlinClient(dir); err != nil {
+			if err := d.writeKotlinClient(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.kt")
@@ -515,7 +515,7 @@ func TestDocRegistry(t *testing.T) {
 			docs := &docRegistry[string]{
 				cfg: &apispec.Config[string]{},
 			}
-			if err := docs.generateTSValidate(outDir); err != nil {
+			if err := docs.generateTSValidate(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(validatePath); !os.IsNotExist(err) {
@@ -538,7 +538,7 @@ func TestDocRegistry(t *testing.T) {
 				aliasNames: map[string]struct{}{},
 			}
 
-			if err := docs.generateTSValidate(outDir); err != nil {
+			if err := docs.generateTSValidate(outDir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			content, err := fs.ReadFile(os.DirFS(outDir), "validate.gen.ts")
@@ -560,7 +560,7 @@ func TestDocRegistry(t *testing.T) {
 				aliasNames: map[string]struct{}{"testEnvelopeKind": {}},
 			}
 			dir := t.TempDir()
-			if err := d.generateTSValidate(dir); err != nil {
+			if err := d.generateTSValidate(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
@@ -577,7 +577,7 @@ func TestDocRegistry(t *testing.T) {
 				SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEnvelope]().PkgPath(): {}},
 			}}
 			dir := t.TempDir()
-			if err := d.generateTSValidate(dir); err != nil {
+			if err := d.generateTSValidate(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
@@ -597,7 +597,7 @@ func TestDocRegistry(t *testing.T) {
 				},
 			}}
 			dir := t.TempDir()
-			if err := d.writeSwiftClient(dir); err != nil {
+			if err := d.writeSwiftClient(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.swift")
@@ -616,7 +616,7 @@ func TestDocRegistry(t *testing.T) {
 			}}
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{KotlinPackage: "example.api", Routes: []apispec.Route{r}}}
 			dir := t.TempDir()
-			if err := d.writeSwiftClient(dir); err != nil {
+			if err := d.writeSwiftClient(dir, diskOutput{}); err != nil {
 				t.Fatal(err)
 			}
 			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.swift")
@@ -659,7 +659,7 @@ func TestGenerate(t *testing.T) {
 			KotlinDir:     kotlinDir,
 			SwiftDir:      swiftDir,
 		}, cfg)
-		if err := Generate(&api); err != nil {
+		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -747,7 +747,7 @@ func TestGenerate(t *testing.T) {
 				}
 				dir := t.TempDir()
 				api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
-				if err := Generate(&api); err != nil {
+				if err := api.Generate(); err != nil {
 					t.Fatal(err)
 				}
 				consumer := `import { APIError, createApiClient } from "./api.gen";
@@ -788,7 +788,7 @@ console.log(client, new APIError(500, "UNKNOWN"));
 			},
 		}
 		api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
-		if err := Generate(&api); err != nil {
+		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
 		consumer := `import { createApiClient } from "./api.gen";
@@ -878,7 +878,7 @@ if (false) client.rawEvents("", handlers);
 			}}},
 		}
 		api := NewAPI(".", OutputConfig{KotlinDir: dir}, cfg)
-		if err := Generate(&api); err != nil {
+		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
 		fixture, err := filepath.Abs("testdata/SSEStreamTest.kt")
@@ -927,7 +927,7 @@ if (false) client.rawEvents("", handlers);
 			}}},
 		}
 		api := NewAPI(".", OutputConfig{SwiftDir: dir}, cfg)
-		if err := Generate(&api); err != nil {
+		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
 		fixture, err := filepath.Abs("testdata/SSEStreamTest.swift")

@@ -5,7 +5,7 @@
 Generate typed TypeScript, Kotlin, and Swift SDKs and an API reference from Go
 DTOs and route definitions.
 
-Define an `apispec.Config` for your routes, then call `apisdkgen.Generate` from
+Define an `apispec.Config` for your routes, then call `API.Generate` from
 your application's generation command. Keep the specification in sync with
 the routes your server exposes. See the Go Reference for configuration and
 output options.
