@@ -109,4 +109,3 @@ public struct testGeneratedErrorDetails: Codable {
 public struct testGeneratedErrorResponse: Codable {
     public let error: testGeneratedErrorDetails
 }
-

@@ -93,4 +93,3 @@ data class testGeneratedErrorDetails(val code: testGeneratedErrorCode, val messa
 
 @Serializable
 data class testGeneratedErrorResponse(val error: testGeneratedErrorDetails)
-

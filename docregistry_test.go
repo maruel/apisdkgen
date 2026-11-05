@@ -630,6 +630,52 @@ func TestDocRegistry(t *testing.T) {
 
 func TestGenerate(t *testing.T) {
 	t.Parallel()
+	t.Run("file endings", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name   string
+			routes []apispec.Route
+		}{
+			{name: "empty"},
+			{name: "JSON", routes: []apispec.Route{{Name: "getEvent", Method: "GET", Path: "/event", Resp: reflect.TypeFor[testSDKEvent]()}}},
+			{name: "SSE", routes: []apispec.Route{{Name: "events", Method: "GET", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				api := NewAPI(".", OutputConfig{
+					TypeScriptDir: dir,
+					KotlinDir:     dir,
+					SwiftDir:      dir,
+					MarkdownDir:   dir,
+				}, apispec.Config[string]{
+					KotlinPackage:   "fixture.api",
+					Routes:          tc.routes,
+					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
+				})
+				if err := api.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				names := []string{"API.md", "ApiClient.kt", "ApiClient.swift", "Types.kt", "Types.swift", "api.gen.ts", "types.gen.ts"}
+				if tc.name == "SSE" {
+					names = append(names, "validate.gen.ts")
+				}
+				for _, name := range names {
+					data, err := fs.ReadFile(os.DirFS(dir), name)
+					if err != nil {
+						t.Fatal(err)
+					}
+					text := string(data)
+					if !strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\n\n") {
+						t.Errorf("%s must end with one newline", name)
+					}
+				}
+				if err := api.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
 	t.Run("configured error code type", func(t *testing.T) {
 		t.Parallel()
 

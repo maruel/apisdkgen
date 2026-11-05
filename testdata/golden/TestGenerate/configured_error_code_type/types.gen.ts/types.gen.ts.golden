@@ -33,4 +33,3 @@ export interface testGeneratedErrorDetails {
 export interface testGeneratedErrorResponse {
   error: testGeneratedErrorDetails;
 }
-

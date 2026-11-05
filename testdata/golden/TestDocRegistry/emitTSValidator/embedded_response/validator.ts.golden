@@ -6,4 +6,3 @@ export function validatetestTSEmbeddedResponse(raw: ValidatorInput): testTSEmbed
     name: asString(obj["name"], "testTSEmbeddedResponse.name"),
   };
 }
-

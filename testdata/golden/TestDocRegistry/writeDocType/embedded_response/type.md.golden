@@ -1,3 +1,4 @@
+
 ### testTSEmbeddedResponse
 
 | Field | Type | Description | Required |
@@ -5,4 +6,3 @@
 | `limit` | `int` |  | yes |
 | `id` | `string` |  | yes |
 | `name` | `string` |  | yes |
-

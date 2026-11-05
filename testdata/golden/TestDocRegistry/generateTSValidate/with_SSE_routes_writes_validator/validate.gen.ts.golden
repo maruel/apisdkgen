@@ -65,4 +65,3 @@ export function validatetestSDKEvent(raw: ValidatorInput): testSDKEvent {
     text: (obj["text"] === undefined || obj["text"] === null ? undefined : asString(obj["text"], "testSDKEvent.text")),
   };
 }
-

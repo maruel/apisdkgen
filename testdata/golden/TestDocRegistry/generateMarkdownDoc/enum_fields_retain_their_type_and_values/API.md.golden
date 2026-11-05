@@ -40,4 +40,3 @@ testDocAuthKind identifies an authentication method.
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `authKind` | `testDocAuthKind` |  | yes |
-
