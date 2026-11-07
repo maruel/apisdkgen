@@ -15,10 +15,11 @@ for tool in curl gpg java npm tar unzip; do
     exit 1
   }
 done
-work_dir="$(mktemp -d)"
+mkdir -p -- "$deps/bin" "$deps/jars"
+# Stage beside the installed files so publication uses same-filesystem renames.
+work_dir="$(mktemp -d "$deps/.install-XXXXXXXX")"
 readonly work_dir
 trap 'rm -rf -- "$work_dir"' EXIT
-mkdir -p -- "$deps/bin" "$deps/jars"
 
 download() {
   local url="$1" dest="$2"
@@ -39,11 +40,14 @@ ln -sfn -- "kotlin-$kotlin_version" "$deps/kotlin"
 ln -sfn -- ../kotlin/bin/kotlinc "$deps/bin/kotlinc"
 
 # JVM runtime dependencies; the compiler supplies the matching Kotlin stdlib.
+jars=()
+old_jars=()
 while read -r group artifact version; do
   jar="$artifact-$version.jar"
   download "https://repo.maven.apache.org/maven2/${group//.//}/$artifact/$version/$jar" "$deps/jars/$jar"
+  jars+=("jars/$jar")
   for old in "$deps/jars/$artifact-"*.jar; do
-    if [[ "$old" != "$deps/jars/$jar" ]]; then rm -- "$old"; fi
+    if [[ "$old" != "$deps/jars/$jar" ]]; then old_jars+=("$old"); fi
   done
 done <<'JARS'
 com.squareup.okhttp3 okhttp-jvm 5.5.1
@@ -53,6 +57,12 @@ org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.11.0
 org.jetbrains.kotlinx kotlinx-serialization-core-jvm 1.12.0
 org.jetbrains.kotlinx kotlinx-serialization-json-jvm 1.12.0
 JARS
+
+# Publish only the pinned, completely downloaded JARs; unrelated cached JARs
+# must not enter the compiler or runtime classpath.
+printf '%s\n' "${jars[@]}" >"$work_dir/kotlin-jars"
+mv -- "$work_dir/kotlin-jars" "$deps/kotlin-jars"
+if ((${#old_jars[@]} > 0)); then rm -- "${old_jars[@]}"; fi
 
 if [[ ! -x "$deps/node_modules/.bin/tsc" ]] || [[ "$("$deps/node_modules/.bin/tsc" --version)" != 'Version 6.0.3' ]]; then
   npm install --prefix "$deps" --no-save --package-lock=false --ignore-scripts typescript@6.0.3

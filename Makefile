@@ -42,14 +42,21 @@ test-deps:
 
 test update-golden: test-deps
 	@set -eu; \
-	classpath=$$(printf '%s:' "$(CURDIR)"/.test-deps/jars/*.jar); \
-	PATH="$(CURDIR)/.test-deps/node_modules/.bin:$(CURDIR)/.test-deps/bin:$$PATH" \
+	classpath=; \
+	while IFS= read -r jar; do classpath="$$classpath$(CURDIR)/.test-deps/$$jar:"; done < "$(CURDIR)/.test-deps/kotlin-jars"; \
+	export PATH="$(CURDIR)/.test-deps/node_modules/.bin:$(CURDIR)/.test-deps/bin:$$PATH" \
 	SWIFTLY_HOME_DIR="$(CURDIR)/.test-deps/swiftly" \
 	SWIFTLY_BIN_DIR="$(CURDIR)/.test-deps/bin" \
 	SWIFTLY_TOOLCHAINS_DIR="$(CURDIR)/.test-deps/swiftly/toolchains" \
 	APISDKGEN_KOTLIN_CLASSPATH="$${classpath%:}" \
-	APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN="$(CURDIR)/.test-deps/kotlin/lib/kotlinx-serialization-compiler-plugin.jar" \
-	go test -count=1 ./... $(if $(filter update-golden,$@),-update)
+	APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN="$(CURDIR)/.test-deps/kotlin/lib/kotlinx-serialization-compiler-plugin.jar"; \
+	if [ "$@" = update-golden ]; then \
+		go test -count=1 . -update; \
+		packages=$$(go list -f '{{if ne .ImportPath .Module.Path}}{{.ImportPath}}{{end}}' ./...); \
+		[ -z "$$packages" ] || go test -count=1 $$packages; \
+	else \
+		go test -count=1 ./...; \
+	fi
 
 git-hooks:
 	@./scripts/install-git-hooks.sh
