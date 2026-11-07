@@ -54,6 +54,7 @@ com.squareup.okhttp3 okhttp-jvm 5.5.1
 com.squareup.okhttp3 okhttp-sse 5.5.1
 com.squareup.okio okio-jvm 3.18.1
 org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.11.0
+org.jetbrains.kotlinx kotlinx-coroutines-test-jvm 1.11.0
 org.jetbrains.kotlinx kotlinx-serialization-core-jvm 1.12.0
 org.jetbrains.kotlinx kotlinx-serialization-json-jvm 1.12.0
 JARS

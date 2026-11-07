@@ -279,7 +279,7 @@ func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, para
 			callArgs = append(callArgs, e.Handler+" = "+e.Handler)
 		}
 		callArgs = append(callArgs, "lastEventID = resumeID.get()", "onEventID = { resumeID.set(it); onEventID?.invoke(it) }")
-		fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = flow {\n        val resumeID = java.util.concurrent.atomic.AtomicReference<String?>(lastEventID)\n        reconnectingNamedFlow { %s(%s) }.collect { emit(it) }\n    }\n", reconnectName, strings.Join(args, ", "), routeRespName(r), r.Name, strings.Join(callArgs, ", "))
+		fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = flow {\n        // This cold flow starts a fresh cursor for each collection.\n        val resumeID = java.util.concurrent.atomic.AtomicReference<String?>(lastEventID)\n        reconnectingFlow { %s(%s) }.collect { emit(it) }\n    }\n", reconnectName, strings.Join(args, ", "), routeRespName(r), r.Name, strings.Join(callArgs, ", "))
 		return
 	}
 
@@ -351,7 +351,7 @@ func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []strin
 		b.WriteString("            default: return nil\n            }\n        }\n    }\n")
 		return
 	}
-	fmt.Fprintf(b, "        sseStream(path: %s)\n", swiftPath)
+	fmt.Fprintf(b, "        sseStream(path: %s, decodeFailure: .discard)\n", swiftPath)
 	b.WriteString("    }\n")
 }
 
@@ -388,11 +388,12 @@ func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, param
 			callArgs = append(callArgs, e.Handler+": "+e.Handler)
 		}
 		callArgs = append(callArgs, "lastEventID: resumeID.get()", "onEventID: { resumeID.set($0); onEventID?($0) }")
-		b.WriteString("        let resumeID = SSECursor(lastEventID)\n")
-		fmt.Fprintf(b, "        return namedReconnectingStream { self.%s(%s) }\n    }\n", r.Name, strings.Join(callArgs, ", "))
+		b.WriteString("        // Each returned stream owns its cursor; create another stream for independent consumption.\n        let resumeID = SSECursor(lastEventID)\n")
+		fmt.Fprintf(b, "        return reconnectingStream { self.%s(%s) }\n    }\n", r.Name, strings.Join(callArgs, ", "))
 		return
 	}
-	fmt.Fprintf(b, "        reconnectingStream { self.%s(%s) }\n", r.Name, strings.Join(callArgs, ", "))
+	b.WriteString("        // Reconnecting plain streams terminate on malformed payloads.\n")
+	fmt.Fprintf(b, "        reconnectingStream { self.sseStream(path: %s, decodeFailure: .terminate) }\n", buildSwiftPath(r.Path, r.QueryParams))
 	b.WriteString("    }\n")
 }
 

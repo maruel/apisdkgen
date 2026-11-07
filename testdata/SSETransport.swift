@@ -42,9 +42,12 @@ enum Transport {
     static var task: URLSessionDataTask?
     static var normalCount = 0
     static var transportCount = 0
+    static var reconnectCount = 0
+    static var attempts: [String: Int] = [:]
     static let openStarted = TransportSignal()
     static let releaseOpen = TransportSignal()
     static let readStarted = TransportSignal()
+    static let backoffEOF = TransportSignal()
 }
 
 extension URLSession {
@@ -54,10 +57,12 @@ extension URLSession {
         let task: URLSessionDataTask
         let idle: Bool
         let failAtEnd: Bool
+        let signalEOF: Bool
         struct Iterator: AsyncIteratorProtocol {
             var content: [UInt8]
             let idle: Bool
             let failAtEnd: Bool
+            let signalEOF: Bool
             var offset = 0
             mutating func next() async throws -> UInt8? {
                 try _Concurrency.Task.checkCancellation()
@@ -66,20 +71,32 @@ extension URLSession {
                     try await _Concurrency.Task.sleep(nanoseconds: 10_000_000_000)
                 }
                 if failAtEnd && offset == content.count { throw URLError(.networkConnectionLost) }
-                guard offset < content.count else { return nil }
+                guard offset < content.count else {
+                    if signalEOF { await Transport.backoffEOF.signal() }
+                    return nil
+                }
                 let byte = content[offset]
                 offset += 1
                 Transport.byteReads += 1
                 return byte
             }
         }
-        func makeAsyncIterator() -> Iterator { Iterator(content: content, idle: idle, failAtEnd: failAtEnd) }
+        func makeAsyncIterator() -> Iterator { Iterator(content: content, idle: idle, failAtEnd: failAtEnd, signalEOF: signalEOF) }
     }
     func bytes(for request: URLRequest) async throws -> (AsyncBytes, URLResponse) {
         Transport.requests.append(request)
         let mode = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value!
+        Transport.attempts[mode, default: 0] += 1
         let content: String
         switch mode {
+        case "transport-plain":
+            if Transport.attempts[mode] == 1 { throw URLError(.networkConnectionLost) }
+            content = "data: {\"kind\":\"recovered\"}\n\n"
+        case "http-error", "backoff": content = ""
+        case "cursor-isolation": content = "id: observed\ndata: {\"kind\":\"isolation\"}\n\n"
+        case "plain-reconnect":
+            Transport.reconnectCount += 1
+            content = Transport.reconnectCount == 1 ? "" : "data: {\"kind\":\"after-eof\"}\n\n"
         case "opening":
             await Transport.openStarted.signal()
             await Transport.releaseOpen.wait()
@@ -121,7 +138,7 @@ extension URLSession {
         }
         let task = TransportTask()
         Transport.task = task
-        return (AsyncBytes(content: Array(content.utf8), task: task, idle: mode == "idle", failAtEnd: mode == "read-failure"),
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        return (AsyncBytes(content: Array(content.utf8), task: task, idle: mode == "idle", failAtEnd: mode == "read-failure", signalEOF: mode == "backoff"),
+                HTTPURLResponse(url: request.url!, statusCode: mode == "http-error" ? 503 : 200, httpVersion: nil, headerFields: nil)!)
     }
 }

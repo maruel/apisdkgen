@@ -14,9 +14,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.Call
 import okhttp3.EventListener
@@ -34,9 +40,34 @@ fun main() = runBlocking {
     val requests = AtomicInteger()
     val ids = CopyOnWriteArrayList<String?>()
     val controls = CopyOnWriteArrayList<String>()
+    val modeRequests = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
+    val isolationIDs = CopyOnWriteArrayList<String?>()
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.createContext("/events") { exchange ->
-        val mode = exchange.requestURI.rawQuery
+        val mode = exchange.requestURI.rawQuery.orEmpty()
+        val attempt = modeRequests.computeIfAbsent(mode) { AtomicInteger() }.incrementAndGet()
+        if (mode.startsWith("cursor=http-error")) {
+            exchange.sendResponseHeaders(503, -1)
+            exchange.close()
+            return@createContext
+        }
+        if (mode.startsWith("cursor=transport-") && attempt == 1) {
+            exchange.close()
+            return@createContext
+        }
+        if (mode == "cursor=plain-eof" || mode.startsWith("cursor=transport-") || mode == "cursor=cursor-isolation") {
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, 0)
+            if (mode == "cursor=cursor-isolation") isolationIDs.add(exchange.requestHeaders.getFirst("Last-Event-ID"))
+            val content = when {
+                mode == "cursor=plain-eof" && attempt == 1 -> ""
+                mode == "cursor=cursor-isolation" -> "id: observed\ndata: {\"kind\":\"isolation\"}\n\n"
+                else -> "data: {\"kind\":\"recovered\"}\n\n"
+            }
+            exchange.responseBody.use { it.write(content.toByteArray()) }
+            exchange.close()
+            return@createContext
+        }
         if (mode == "cursor=burst") {
             exchange.responseHeaders.add("Content-Type", "text/event-stream")
             exchange.sendResponseHeaders(200, 0)
@@ -124,11 +155,33 @@ fun main() = runBlocking {
     }
     server.start()
     val cancelledCalls = AtomicInteger()
-    val http = OkHttpClient.Builder().eventListener(object : EventListener() {
+    val http = OkHttpClient.Builder().retryOnConnectionFailure(false).eventListener(object : EventListener() {
         override fun canceled(call: Call) { cancelledCalls.incrementAndGet() }
     }).build()
     try {
         val client = ApiClient("http://127.0.0.1:${server.address.port}", httpClient = http)
+        verifyReconnectTiming(client)
+        val afterEOF = withTimeout(3000) { client.plainEventsReconnecting("plain-eof").take(1).toList() }
+        check(afterEOF.single().kind == "recovered" && modeRequests["cursor=plain-eof"]?.get() == 2)
+        for (named in listOf(false, true)) {
+            val mode = if (named) "transport-named" else "transport-plain"
+            val stream = if (named) client.eventsReconnecting(mode) else client.plainEventsReconnecting(mode)
+            check(withTimeout(3000) { stream.take(1).toList() }.single().kind == "recovered")
+            check(modeRequests["cursor=$mode"]?.get() == 2)
+            val rejected = if (named) "http-error-named" else "http-error-plain"
+            try {
+                withTimeout(3000) {
+                    (if (named) client.eventsReconnecting(rejected) else client.plainEventsReconnecting(rejected)).toList()
+                }
+                error("HTTP rejection was swallowed")
+            } catch (e: java.io.IOException) { check(e.message == "SSE connection failed: HTTP 503") }
+            check(modeRequests["cursor=$rejected"]?.get() == 1) { "HTTP rejection was retried" }
+        }
+        val order = mutableListOf<String>()
+        val isolated = client.eventsReconnecting("cursor-isolation", lastEventID = "seed", onEventID = { order.add("id:$it") })
+        repeat(2) { withTimeout(3000) { isolated.onEach { order.add("message") }.take(1).toList() } }
+        check(isolationIDs == listOf("seed", "seed")) { "Cursor leaked between collections: $isolationIDs" }
+        check(order == listOf("id:observed", "message", "id:observed", "message"))
         val bodyFailure = java.io.IOException("body read failure")
         val bodyClosed = java.util.concurrent.atomic.AtomicBoolean()
         val readStarted = CompletableDeferred<Unit>()
@@ -204,6 +257,12 @@ fun main() = runBlocking {
             withTimeout(3000) { client.plainEvents("malformed").toList() }
             error("Plain stream swallowed decode failure")
         } catch (_: kotlinx.serialization.SerializationException) { }
+        val beforeMalformed = modeRequests["cursor=malformed"]?.get() ?: 0
+        try {
+            withTimeout(3000) { client.plainEventsReconnecting("malformed").toList() }
+            error("Plain reconnect swallowed decode failure")
+        } catch (_: kotlinx.serialization.SerializationException) { }
+        check(modeRequests["cursor=malformed"]?.get() == beforeMalformed + 1)
         var ready = 0
         val framed = withTimeout(3000) { client.events("framing", onReady = { ready++ }).toList() }
         check(framed.map { it.kind } == listOf("bom", "雪", "last") && ready == 1) { "Frame boundaries lost dispatch: $framed" }
@@ -225,26 +284,32 @@ fun main() = runBlocking {
         }
         val limited = ApiClient("http://127.0.0.1:${server.address.port}", httpClient = http, maxSSEEventBytes = 4096)
         for (reconnect in listOf(false, true)) {
+            val before = modeRequests["cursor=large"]?.get() ?: 0
             try {
                 withTimeout(3000) {
                     (if (reconnect) limited.eventsReconnecting("large") else limited.events("large")).toList()
                 }
                 error("Explicit line limit was ignored")
             } catch (e: java.io.IOException) { check(e.message == "SSE line too large") }
+            check(modeRequests["cursor=large"]?.get() == before + 1) { "Size rejection was retried" }
         }
         try {
             withTimeout(3000) { client.events("malformed").toList() }
             error("Malformed checkpoint was swallowed")
         } catch (_: kotlinx.serialization.SerializationException) { }
+        val beforeControl = modeRequests["cursor=malformed"]?.get() ?: 0
         try {
             withTimeout(3000) { client.eventsReconnecting("malformed").toList() }
             error("Reconnecting stream swallowed malformed checkpoint")
         } catch (_: kotlinx.serialization.SerializationException) { }
+        check(modeRequests["cursor=malformed"]?.get() == beforeControl + 1)
         val failure = java.io.IOException("callback failure")
+        val beforeCallback = modeRequests["cursor=callback"]?.get() ?: 0
         try {
             withTimeout(3000) { client.eventsReconnecting("callback", onCheckpoint = { throw failure }).toList() }
             error("Reconnecting stream swallowed callback failure")
         } catch (e: java.io.IOException) { check(e === failure) }
+        check(modeRequests["cursor=callback"]?.get() == beforeCallback + 1) { "Callback failure was retried" }
         for (reconnect in listOf(false, true)) for (cancelFromID in listOf(false, true)) {
             val cancellation = CancellationException("callback stop")
             try {
@@ -267,6 +332,7 @@ fun main() = runBlocking {
             withTimeout(3000) { limited.eventsReconnecting("oversized").toList() }
             error("Oversized frame was accepted")
         } catch (e: java.io.IOException) { check(e.message == "SSE frame too large") }
+        check(modeRequests["cursor=oversized"]?.get() == 1) { "Frame limit rejection was retried" }
         val started = System.nanoTime()
         try {
             withTimeout(300) { client.events("idle").toList() }
@@ -279,4 +345,48 @@ fun main() = runBlocking {
         http.dispatcher.executorService.shutdown()
         http.connectionPool.evictAll()
     }
+}
+
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+private fun verifyReconnectTiming(client: ApiClient) = runTest {
+    // Keep runtime helpers private; invoke their real flow under the coroutine test clock.
+    val method = ApiClient::class.java.getDeclaredMethod("reconnectingFlow", kotlin.Function0::class.java)
+    method.isAccessible = true
+    var attempts = 0
+    val connect: () -> Flow<testSDKEvent> = {
+        check(++attempts <= 4) { "Clean EOF hot loop" }
+        flow { }
+    }
+    val reconnecting = method.invoke(client, connect) as Flow<*>
+    val collector = backgroundScope.launch { reconnecting.collect { error("Unexpected event") } }
+    runCurrent()
+    check(attempts == 1) { "Clean EOF reconnected without backoff: $attempts attempts" }
+    advanceTimeBy(374)
+    runCurrent()
+    check(attempts == 1) { "Retry preceded the minimum jittered delay" }
+    collector.cancelAndJoin()
+    advanceTimeBy(100_000)
+    runCurrent()
+    check(attempts == 1) { "Cancellation during backoff reconnected" }
+    val times = mutableListOf<Long>()
+    var connections = 0
+    val scripted: () -> Flow<testSDKEvent> = {
+        times.add(testScheduler.currentTime)
+        val connection = ++connections
+        flow {
+            if (connection == 4) emit(testSDKEvent(kind = "reset"))
+            if (connection >= 30) kotlinx.coroutines.awaitCancellation()
+        }
+    }
+    val progressing = method.invoke(client, scripted) as Flow<*>
+    val progress = backgroundScope.launch { progressing.collect { check((it as testSDKEvent).kind == "reset") } }
+    runCurrent()
+    repeat(30) { advanceTimeBy(40_000); runCurrent() }
+    check(times.size == 30)
+    check(times[1] - times[0] in 375L..625L)
+    check(times[2] - times[1] in 562L..938L)
+    check(times[3] - times[2] in 843L..1407L)
+    check(times[4] - times[3] in 375L..625L) { "Delivered value did not reset backoff" }
+    check(times.last() - times[times.lastIndex - 1] in 22_500L..37_500L) { "Backoff did not stop at its cap" }
+    progress.cancelAndJoin()
 }

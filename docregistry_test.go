@@ -1106,18 +1106,29 @@ if (false) client.rawEvents("", handlers);
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
-		fixture, err := filepath.Abs("testdata/SSEStreamTest.swift")
+		transport, err := filepath.Abs("testdata/SSETransport.swift")
 		if err != nil {
 			t.Fatal(err)
 		}
-		transport, err := filepath.Abs("testdata/SSETransport.swift")
+		// Compile the fixture in the client's source scope to verify private policy
+		// without widening the generated SDK's visibility for tests.
+		clientSource, err := fs.ReadFile(os.DirFS(dir), "ApiClient.swift")
 		if err != nil {
+			t.Fatal(err)
+		}
+		fixtureSource, err := fs.ReadFile(os.DirFS("."), "testdata/SSEStreamTest.swift")
+		if err != nil {
+			t.Fatal(err)
+		}
+		combined := filepath.Join(dir, "Runtime.swift")
+		// #nosec G703 -- This source file is inside the test's private temporary directory.
+		if err := os.WriteFile(combined, append(append(clientSource, '\n'), fixtureSource...), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
 		binary := filepath.Join(dir, "runtime")
 		// #nosec G204 -- Fixed compiler and flags consume only generated temporary files and the repository fixture.
-		cmd := exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", filepath.Join(dir, "ApiClient.swift"), filepath.Join(dir, "Types.swift"), transport, fixture, "-o", binary)
+		cmd := exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", combined, filepath.Join(dir, "Types.swift"), transport, "-o", binary)
 		if !t.Run("compile", func(t *testing.T) {
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("Swift compilation failed: %v\n%s", err, out)

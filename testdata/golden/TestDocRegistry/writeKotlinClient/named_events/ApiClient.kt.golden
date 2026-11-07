@@ -135,7 +135,12 @@ class ApiClient(
                 }
             }
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                close(t ?: java.io.IOException("SSE connection failed: HTTP ${response?.code ?: "unknown"}"))
+                val failure = if (t is java.io.IOException && (response == null || response.isSuccessful)) {
+                    SSETransportFailure(t)
+                } else {
+                    t ?: java.io.IOException("SSE connection failed: HTTP ${response?.code ?: "unknown"}")
+                }
+                close(failure)
             }
             override fun onClosed(eventSource: EventSource) {
                 close()
@@ -224,7 +229,7 @@ class ApiClient(
                     val parser = SSEFrameParser(maxSSEEventBytes)
                     while (!sseIO { source.exhausted() }) {
                         val frame = parser.accept(sseIO { source.readByte() }.toInt() and 255) ?: continue
-                        // Cursor observation precedes dispatch; unknown types are ignored by decode.
+                        // A completed-frame ID is transport position, saved before callbacks/decode/delivery; it is not an acknowledgement.
                         frame.id?.let { onEventID?.invoke(it) }
                         frame.data?.let { data ->
                             val event = decode(frame.type, data)
@@ -246,34 +251,32 @@ class ApiClient(
 
     // Reconnecting SSE wrappers with exponential backoff.
     fun eventsReconnecting(cursor: String, onCheckpoint: ((testSSECheckpoint) -> Unit)? = null, onStats: ((testSDKEvent) -> Unit)? = null, onReset: ((testSSEReset) -> Unit)? = null, onHistoryError: ((testSSEError) -> Unit)? = null, onReady: (() -> Unit)? = null, lastEventID: String? = null, onEventID: ((String) -> Unit)? = null): Flow<testSDKEvent> = flow {
+        // This cold flow starts a fresh cursor for each collection.
         val resumeID = java.util.concurrent.atomic.AtomicReference<String?>(lastEventID)
-        reconnectingNamedFlow { events(cursor, onCheckpoint = onCheckpoint, onStats = onStats, onReset = onReset, onHistoryError = onHistoryError, onReady = onReady, lastEventID = resumeID.get(), onEventID = { resumeID.set(it); onEventID?.invoke(it) }) }.collect { emit(it) }
+        reconnectingFlow { events(cursor, onCheckpoint = onCheckpoint, onStats = onStats, onReset = onReset, onHistoryError = onHistoryError, onReady = onReady, lastEventID = resumeID.get(), onEventID = { resumeID.set(it); onEventID?.invoke(it) }) }.collect { emit(it) }
     }
 
-    private fun <T> reconnectingNamedFlow(connect: () -> Flow<T>): Flow<T> = flow {
-        var delayMs = 500L
-        while (true) {
-            try {
-                connect().onEach { delayMs = 500L }.collect { emit(it) }
-            } catch (e: SSETransportFailure) {
-                // Only exceptions marked at network reads are retryable.
-            }
-            delay(jitteredDelay(delayMs))
+    // Each collection owns its backoff. Receiving primary values resets it.
+    private class SSEBackoff {
+        private var delayMs = 500L
+        fun reset() { delayMs = 500L }
+        fun nextDelay(): Long {
+            val current = delayMs
             delayMs = (delayMs * 3 / 2).coerceAtMost(30_000L)
+            return current
         }
     }
 
+    // Clean EOF and failures marked at transport boundaries retry; all other failures terminate.
     private fun <T> reconnectingFlow(connect: () -> Flow<T>): Flow<T> = flow {
-        var delayMs = 500L
+        val backoff = SSEBackoff()
         while (true) {
             try {
-                connect().onEach { delayMs = 500L }.collect { emit(it) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                delay(jitteredDelay(delayMs))
-                delayMs = (delayMs * 3 / 2).coerceAtMost(30_000L)
+                connect().onEach { backoff.reset() }.collect { emit(it) }
+            } catch (_: SSETransportFailure) {
+                // Decoder, callback, HTTP, size and cancellation errors retain their identity.
             }
+            delay(jitteredDelay(backoff.nextDelay()))
         }
     }
 

@@ -4,6 +4,12 @@ import Foundation
 @main private struct SSEStreamTest {
     static func main() async throws {
         let client = ApiClient(baseURL: "https://example.test")
+        var policy = SSEBackoff()
+        precondition([policy.nextDelay(), policy.nextDelay(), policy.nextDelay()] == [500_000_000, 750_000_000, 1_125_000_000])
+        for _ in 0..<40 { _ = policy.nextDelay() }
+        precondition(policy.nextDelay() == 4_000_000_000)
+        policy.reset()
+        precondition(policy.nextDelay() == 500_000_000)
         var ready = 0
         var framed: [String] = []
         for try await event in client.events(cursor: "framing", onReady: { ready += 1 }) {
@@ -14,6 +20,27 @@ import Foundation
         var plain: [String] = []
         for try await event in client.plainEvents(cursor: "plain") { plain.append(event.kind) }
         precondition(plain == ["雪", "last"], "Plain streams frame multiline data and discard decode failures")
+        var afterEOF = client.plainEventsReconnecting(cursor: "plain-reconnect").makeAsyncIterator()
+        let resumed = try await afterEOF.next()
+        precondition(resumed?.kind == "after-eof" && Transport.reconnectCount == 2, "Clean EOF must reconnect")
+        let malformedCount = Transport.requests.count
+        var strict = client.plainEventsReconnecting(cursor: "plain").makeAsyncIterator()
+        let validFirst = try await strict.next()
+        precondition(validFirst?.kind == "雪")
+        do { _ = try await strict.next(); preconditionFailure("Reconnecting plain stream swallowed malformed data") }
+        catch is DecodingError { }
+        precondition(Transport.requests.count == malformedCount + 1)
+        for named in [false, true] {
+            let before = Transport.requests.count
+            var rejected = (named ? client.eventsReconnecting(cursor: "http-error") : client.plainEventsReconnecting(cursor: "http-error")).makeAsyncIterator()
+            do { _ = try await rejected.next(); preconditionFailure("HTTP rejection was swallowed") }
+            catch let error as ApiError { precondition(!named && error.statusCode == 503) }
+            catch let error as URLError { precondition(named && error.code == .badServerResponse) }
+            precondition(Transport.requests.count == before + 1, "HTTP rejection must be terminal")
+        }
+        var plainRecovered = client.plainEventsReconnecting(cursor: "transport-plain").makeAsyncIterator()
+        let plainValue = try await plainRecovered.next()
+        precondition(plainValue?.kind == "recovered" && Transport.attempts["transport-plain"] == 2)
         Transport.requests.removeAll()
         var controls: [String] = []
         var iterator = client.eventsReconnecting(cursor: "normal",
@@ -34,6 +61,17 @@ import Foundation
         }
         precondition(controls == ["checkpoint:c1", "stats:stats", "reset:/bootstrap", "error:recover", "ready"])
         precondition(Transport.requests.map { $0.value(forHTTPHeaderField: "Last-Event-ID") } == [nil, "c1", "id-only", ""])
+        let initialIDs: [String?] = ["seed", "", nil]
+        var order: [String] = []
+        for seed in initialIDs {
+            var isolated: AsyncThrowingStream<testSDKEvent, Error>.Iterator? = client.eventsReconnecting(cursor: "cursor-isolation", lastEventID: seed, onEventID: { order.append("id:\($0)") }).makeAsyncIterator()
+            let event = try await isolated?.next()
+            precondition(event?.kind == "isolation")
+            order.append("message")
+            isolated = nil
+        }
+        precondition(Transport.requests.suffix(3).map { $0.value(forHTTPHeaderField: "Last-Event-ID") } == initialIDs)
+        precondition(order == ["id:observed", "message", "id:observed", "message", "id:observed", "message"])
         for mode in ["large", "escaped"] {
             var large = client.events(cursor: mode).makeAsyncIterator()
             let event = try await large.next()
@@ -49,9 +87,11 @@ import Foundation
             precondition(Transport.requests.count == count + 1, "Size rejection must be terminal")
         }
         for reconnect in [false, true] {
+            let before = Transport.requests.count
             var malformed = (reconnect ? client.eventsReconnecting(cursor: "malformed") : client.events(cursor: "malformed")).makeAsyncIterator()
             do { _ = try await malformed.next(); preconditionFailure("Malformed control without callback was swallowed") }
             catch is DecodingError { }
+            precondition(Transport.requests.count == before + 1, "Malformed controls must be terminal")
         }
         var recovered = client.eventsReconnecting(cursor: "transport").makeAsyncIterator()
         let value = try await recovered.next()
@@ -80,6 +120,15 @@ import Foundation
         blocked.cancel()
         _ = await blocked.result
         precondition(Transport.task?.state != .suspended, "Cancellation must cancel the response task")
+        let retrying = _Concurrency.Task {
+            var iterator = client.plainEventsReconnecting(cursor: "backoff").makeAsyncIterator()
+            _ = try await iterator.next()
+        }
+        await Transport.backoffEOF.wait()
+        retrying.cancel()
+        do { _ = try await retrying.value; preconditionFailure("Cancellation during backoff was swallowed") }
+        catch is CancellationError { }
+        precondition(Transport.attempts["backoff"] == 1, "Cancellation during backoff reconnected")
         print("PASS: generated Swift lossless pull, typed controls, ID-only/empty reset, EOF/transport reconnect, terminal decode and cancellation")
     }
 
