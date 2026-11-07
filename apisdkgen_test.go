@@ -3,8 +3,10 @@
 package apisdkgen
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -27,8 +29,8 @@ func TestGenerateErrors(t *testing.T) {
 			{Name: "getEvent", Method: "GET", Path: "/event", Resp: reflect.TypeFor[testSDKEvent]()},
 			{Name: "broken", Method: "GET", Path: "/broken"},
 		}}
-		api := NewAPI(".", OutputConfig{TypeScriptDir: root}, cfg)
-		const want = `invalid API specification: routes[1] ("broken"): response type is required`
+		api := NewAPI(root, "FixtureSDK", NewVersion("v1", ".", cfg))
+		const want = `version v1: invalid API specification: routes[1] ("broken"): response type is required`
 		if err := api.Generate(); err == nil || err.Error() != want {
 			t.Fatalf("Generate() = %v; want %q", err, want)
 		}
@@ -59,8 +61,9 @@ func TestGenerateErrors(t *testing.T) {
 		if err := os.WriteFile(output, []byte(previous), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		api := NewAPI(root, OutputConfig{TypeScriptDir: root}, apispec.Config[string]{})
-		if err := api.Generate(); err == nil || err.Error() != "loading docs: string constant StateFirst: unsupported expression *ast.SelectorExpr" {
+		api := NewAPI(root, "FixtureSDK", NewVersion("v1", root, apispec.Config[string]{}))
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err == nil || err.Error() != "version v1: loading docs: string constant StateFirst: unsupported expression *ast.SelectorExpr" {
 			t.Fatalf("Generate() = %v", err)
 		}
 		data, err := fs.ReadFile(os.DirFS(root), "types.gen.ts")
@@ -169,10 +172,9 @@ func TestGenerateErrors(t *testing.T) {
 				cfg := apispec.Config[string]{KotlinPackage: "fixture.api", Routes: []apispec.Route{{Name: "getEvent", Method: "GET", Path: "/event", Resp: reflect.TypeFor[testSDKEvent]()}}}
 				tc.change(&cfg)
 				root := t.TempDir()
-				output := OutputConfig{TypeScriptDir: filepath.Join(root, "ts"), KotlinDir: filepath.Join(root, "kt"), SwiftDir: filepath.Join(root, "swift"), MarkdownDir: filepath.Join(root, "docs")}
 				// An absent source directory also proves validation precedes documentation loading.
-				api := NewAPI(filepath.Join(root, "source"), output, cfg)
-				want := "invalid API specification: " + tc.want
+				api := NewAPI(filepath.Join(root, "sdk"), "FixtureSDK", NewVersion("v1", filepath.Join(root, "source"), cfg))
+				want := "version v1: invalid API specification: " + tc.want
 				if err := api.Generate(); err == nil || err.Error() != want {
 					t.Fatalf("Generate() = %v; want %q", err, want)
 				}
@@ -188,7 +190,7 @@ func TestGenerateErrors(t *testing.T) {
 	})
 }
 
-func TestOutputConfig(t *testing.T) {
+func TestOutputPaths(t *testing.T) {
 	t.Parallel()
 	t.Run("validate", func(t *testing.T) {
 		t.Parallel()
@@ -196,12 +198,12 @@ func TestOutputConfig(t *testing.T) {
 			t.Parallel()
 			for _, tc := range []struct {
 				name   string
-				output OutputConfig
+				output outputPaths
 				cfg    apispec.Config[string]
 			}{
-				{"TypeScript without Kotlin package", OutputConfig{TypeScriptDir: "unused"}, apispec.Config[string]{}},
-				{"Kotlin package", OutputConfig{KotlinDir: "unused"}, apispec.Config[string]{KotlinPackage: "fixture.api"}},
-				{"other outputs ignore Kotlin package", OutputConfig{SwiftDir: "unused", MarkdownDir: "unused"}, apispec.Config[string]{KotlinPackage: "invalid..package"}},
+				{"TypeScript without Kotlin package", outputPaths{TypeScriptDir: "unused"}, apispec.Config[string]{}},
+				{"Kotlin package", outputPaths{KotlinDir: "unused"}, apispec.Config[string]{KotlinPackage: "fixture.api"}},
+				{"other outputs ignore Kotlin package", outputPaths{SwiftDir: "unused", MarkdownFile: "unused"}, apispec.Config[string]{KotlinPackage: "invalid..package"}},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
@@ -232,7 +234,7 @@ func testValidateScopedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("valid", func(t *testing.T) {
-		output := OutputConfig{TypeScriptDir: "unused"}
+		output := outputPaths{TypeScriptDir: "unused"}
 		if err := output.validate(&cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -240,10 +242,10 @@ func testValidateScopedNames(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		for _, tc := range []struct {
 			name   string
-			output OutputConfig
+			output outputPaths
 		}{
-			{"Kotlin", OutputConfig{KotlinDir: "unused"}},
-			{"Swift", OutputConfig{SwiftDir: "unused"}},
+			{"Kotlin", outputPaths{KotlinDir: "unused"}},
+			{"Swift", outputPaths{SwiftDir: "unused"}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				const want = `routes[1] ("events"): duplicate native method "events"`
@@ -259,7 +261,7 @@ func testValidateScopedNames(t *testing.T) {
 				cfg.Routes[i].IsSSE = true
 			}
 			const want = `routes[1] ("events"): duplicate SSE handler type "EventsHandlers"`
-			output := OutputConfig{TypeScriptDir: "unused"}
+			output := outputPaths{TypeScriptDir: "unused"}
 			if err := output.validate(&cfg); err == nil || err.Error() != want {
 				t.Fatalf("got %v; want %q", err, want)
 			}
@@ -271,33 +273,45 @@ func TestVerify(t *testing.T) {
 	root := t.TempDir()
 	out := filepath.Join(root, "sdk")
 	cfg := apispec.Config[string]{Routes: []apispec.Route{{Name: "getEvent", Method: "GET", Path: "/event", Resp: reflect.TypeFor[testSDKEvent]()}}}
-	api := NewAPI(".", OutputConfig{TypeScriptDir: out, MarkdownDir: out}, cfg)
+	api := NewAPI(out, "FixtureSDK", NewVersion("v1", ".", cfg))
+	api.Languages = []Language{TypeScript}
 	if err := api.Generate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.Verify(); err != nil {
 		t.Fatal(err)
 	}
-	changed := filepath.Join(out, "api.gen.ts")
-	missing := filepath.Join(out, "types.gen.ts")
+	changed := filepath.Join(out, "ts", "v1", "api.gen.ts")
+	missing := filepath.Join(out, "ts", "v1", "types.gen.ts")
 	obsolete := filepath.Join(out, "old.ts")
-	validator := filepath.Join(out, "validate.gen.ts")
-	if err := os.WriteFile(validator, []byte("previous validator"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(changed, []byte("user edit"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(missing); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(obsolete, []byte("// Code generated by gen-api-sdk. DO NOT EDIT.\nold"), 0o600); err != nil {
+	if err := os.WriteFile(obsolete, []byte("no generated header"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(out, "handwritten.ts"), []byte("handwritten"), 0o600); err != nil {
+	staleDir := filepath.Join(out, "old-package")
+	if err := os.Mkdir(staleDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	want := "SDK output is stale:\nchanged: " + changed + "\nmissing: " + missing + "\nobsolete: " + obsolete + "\nobsolete: " + validator
+	if err := os.WriteFile(filepath.Join(staleDir, "old.ts"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(root, "external")
+	if err := os.Mkdir(external, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "keep"), []byte("outside output"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(out, "linked")
+	if err := os.Symlink(external, link); err != nil {
+		t.Fatal(err)
+	}
+	want := "SDK output is stale:\nchanged: " + changed + "\nmissing: " + missing + "\nobsolete: " + link + "\nobsolete: " + staleDir + "\nobsolete: " + obsolete
 	if err := api.Verify(); err == nil || err.Error() != want {
 		t.Fatalf("Verify() = %v; want %s", err, want)
 	}
@@ -309,10 +323,11 @@ func TestVerify(t *testing.T) {
 		t.Fatalf("missing output: %v", err)
 	}
 	//nolint:gosec // The path is inside this test’s temporary directory.
-	if data, err := os.ReadFile(obsolete); err != nil || string(data) != "// Code generated by gen-api-sdk. DO NOT EDIT.\nold" {
+	if data, err := os.ReadFile(obsolete); err != nil || string(data) != "no generated header" {
 		t.Fatalf("obsolete output = %q, %v", data, err)
 	}
-	bad := NewAPI(filepath.Join(root, "absent"), OutputConfig{TypeScriptDir: out}, cfg)
+	bad := NewAPI(out, "FixtureSDK", NewVersion("v1", filepath.Join(root, "absent"), cfg))
+	bad.Languages = []Language{TypeScript}
 	if err := bad.Verify(); err == nil {
 		t.Fatal("expected generation failure")
 	}
@@ -332,4 +347,250 @@ func TestVerify(t *testing.T) {
 	if info, err := os.Stat(changed); err != nil || !info.IsDir() {
 		t.Fatalf("comparison changed directory: %v", err)
 	}
+	if err := api.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{link, staleDir, obsolete} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("stale entry %s survived generation: %v", path, err)
+		}
+	}
+	//nolint:gosec // The path is inside this test's temporary directory.
+	if data, err := os.ReadFile(filepath.Join(external, "keep")); err != nil || string(data) != "outside output" {
+		t.Fatalf("external file = %q, %v", data, err)
+	}
+}
+
+func TestAPI(t *testing.T) {
+	t.Parallel()
+	first := NewVersion("v1", ".", apispec.Config[string]{
+		KotlinPackage: "fixture.v1", APIDocTitle: "First API",
+		SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSSEError]().PkgPath(): {}},
+		ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+		ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError", TSCodeExpr: `"UNKNOWN"`, TSDetailsExpr: "undefined", KTCodeExpr: `"UNKNOWN"`, KTMessageExpr: "err.message", KTDetailsExpr: "null", SwiftCodeExpr: `"UNKNOWN"`, SwiftMessageExpr: "errResp.message", SwiftDetailsExpr: "nil"},
+	})
+	cfg := discoveryConfig(reflect.TypeFor[testSDKEvent]())
+	cfg.KotlinPackage = "fixture.v2"
+	cfg.APIDocTitle = "Second API"
+	second := NewVersion("v2", ".", cfg)
+	t.Run("Generate", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "sdk")
+		api := NewAPI(root, "FixtureSDK", second, first)
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		if err := api.Verify(); err != nil {
+			t.Fatal(err)
+		}
+		files := discoveryFiles(t, root)
+		names := make([]string, 0, len(files))
+		for path := range files {
+			names = append(names, path)
+		}
+		slices.Sort(names)
+		want := []string{
+			"API.v1.md", "API.v2.md",
+			"kotlin/.gitignore", "kotlin/build.gradle.kts", "kotlin/settings.gradle.kts",
+			"kotlin/src/main/kotlin/fixture/v1/ApiClient.kt", "kotlin/src/main/kotlin/fixture/v1/Types.kt",
+			"kotlin/src/main/kotlin/fixture/v2/ApiClient.kt", "kotlin/src/main/kotlin/fixture/v2/Types.kt",
+			"swift/.gitignore", "swift/Package.swift",
+			"swift/Sources/FixtureSDKV1/ApiClient.swift", "swift/Sources/FixtureSDKV1/Types.swift",
+			"swift/Sources/FixtureSDKV2/ApiClient.swift", "swift/Sources/FixtureSDKV2/Types.swift",
+			"ts/.gitignore", "ts/package.json", "ts/tsconfig.json",
+			"ts/v1/api.gen.ts", "ts/v1/types.gen.ts", "ts/v2/api.gen.ts", "ts/v2/types.gen.ts",
+		}
+		if !slices.Equal(names, want) {
+			t.Fatalf("package files = %v; want %v", names, want)
+		}
+		for _, path := range []string{"kotlin/build.gradle.kts", "kotlin/settings.gradle.kts", "swift/Package.swift", "ts/package.json", "ts/tsconfig.json"} {
+			assertGolden(t, filepath.Base(path), files[path])
+		}
+		if files["API.v1.md"] == files["API.v2.md"] {
+			t.Fatal("versions share documentation")
+		}
+		reversed := NewAPI(root, "FixtureSDK", first, second)
+		if err := reversed.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		if got := discoveryFiles(t, root); !reflect.DeepEqual(files, got) {
+			t.Fatal("version registration order changed generated output")
+		}
+		t.Run("TypeScript package", func(t *testing.T) {
+			consumer := filepath.Join(root, "ts", "v1", "consumer.ts")
+			if err := os.WriteFile(consumer, []byte(`import { createApiClient as v1 } from "fixturesdk/v1/api.gen";
+import { createApiClient as v2 } from "fixturesdk/v2/api.gen";
+export const clients = [v1(), v2()];
+`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Remove(consumer); err != nil {
+					t.Error(err)
+				}
+			})
+			// #nosec G204 G702 -- The compiler and flags are fixed; the project is this test's generated temporary package.
+			cmd := exec.CommandContext(t.Context(), "tsc", "--project", filepath.Join(root, "ts"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("TypeScript package: %v\n%s", err, out)
+			}
+		})
+		t.Run("Swift manifest", func(t *testing.T) {
+			if _, err := exec.LookPath("swift"); err != nil {
+				t.Skip("run make test to configure Swift")
+			}
+			// #nosec G204 G702 -- Swift parses this test's generated temporary package without a shell.
+			cmd := exec.CommandContext(t.Context(), "swift", "package", "--package-path", filepath.Join(root, "swift"), "dump-package")
+			data, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pkg struct {
+				Name     string
+				Targets  []struct{ Name string }
+				Products []struct{ Name string }
+			}
+			if err := json.Unmarshal(data, &pkg); err != nil {
+				t.Fatal(err)
+			}
+			if pkg.Name != "FixtureSDK" || len(pkg.Targets) != 2 || pkg.Targets[0].Name != "FixtureSDKV1" || pkg.Targets[1].Name != "FixtureSDKV2" || len(pkg.Products) != 2 || pkg.Products[0].Name != "FixtureSDKV1" || pkg.Products[1].Name != "FixtureSDKV2" {
+				t.Fatalf("Swift package = %+v", pkg)
+			}
+		})
+		// Building a package may populate these standard tool caches.
+		for _, path := range []string{"kotlin/.gradle", "kotlin/.kotlin", "kotlin/build", "swift/.build", "swift/.swiftpm", "ts/node_modules"} {
+			dir := filepath.Join(root, filepath.FromSlash(path))
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cache"), []byte("tool output"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := api.Verify(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "unexpected"), []byte("old output"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := api.Verify(); err == nil || err.Error() != "SDK output is stale:\nobsolete: "+filepath.Join(root, "unexpected") {
+			t.Fatalf("unexpected file = %v", err)
+		}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		if got := discoveryFiles(t, root); !reflect.DeepEqual(files, got) {
+			t.Fatal("generation did not replace entire package")
+		}
+	})
+	t.Run("output directory symlinks", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct{ name, suffix string }{
+			{name: "clean"},
+			{name: "trailing separator", suffix: string(os.PathSeparator)},
+			{name: "trailing dot segment", suffix: string(os.PathSeparator) + "." + string(os.PathSeparator)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				base := t.TempDir()
+				external := filepath.Join(base, "external")
+				original := NewAPI(external, "FixtureSDK", first)
+				original.Languages = []Language{TypeScript}
+				if err := original.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				files := discoveryFiles(t, external)
+				root := filepath.Join(base, "sdk")
+				if err := os.Symlink(external, root); err != nil {
+					t.Fatal(err)
+				}
+				api := NewAPI(root+tc.suffix, "FixtureSDK", first)
+				api.Languages = []Language{TypeScript}
+				if err := api.Verify(); err == nil || err.Error() != "SDK output is stale:\nchanged: "+root {
+					t.Fatalf("root symlink Verify = %v", err)
+				}
+				if err := api.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				if info, err := os.Lstat(root); err != nil || !info.IsDir() {
+					t.Fatalf("generated root = %v, %v", info, err)
+				}
+				if got := discoveryFiles(t, external); !reflect.DeepEqual(files, got) {
+					t.Fatal("generation changed external root")
+				}
+				child := filepath.Join(root, "ts")
+				moved := filepath.Join(base, "external-ts")
+				if err := os.Rename(child, moved); err != nil {
+					t.Fatal(err)
+				}
+				subtree := discoveryFiles(t, moved)
+				if err := os.Symlink(moved, child); err != nil {
+					t.Fatal(err)
+				}
+				if err := api.Verify(); err == nil || err.Error() != "SDK output is stale:\nchanged: "+child {
+					t.Fatalf("expected directory symlink Verify = %v", err)
+				}
+				if err := api.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				if got := discoveryFiles(t, moved); !reflect.DeepEqual(subtree, got) {
+					t.Fatal("generation changed external subtree")
+				}
+				if err := api.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid output roots", func(t *testing.T) {
+		t.Parallel()
+		for _, root := range []string{"", ".", "." + string(os.PathSeparator), "nested" + string(os.PathSeparator) + "..", string(os.PathSeparator)} {
+			// No versions keeps this test non-destructive if root validation regresses.
+			api := NewAPI(root, "FixtureSDK")
+			if err := api.Generate(); err == nil || err.Error() != "output directory must be a non-root package directory" {
+				t.Errorf("Generate(%q) = %v", root, err)
+			}
+		}
+	})
+
+	t.Run("invalid input preserves output", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name      string
+			versions  []Version
+			languages []Language
+			want      string
+		}{
+			{name: "no versions", want: "at least one API version is required"},
+			{name: "duplicate version", versions: []Version{first, first}, want: `duplicate API version "v1"`},
+			{name: "invalid version", versions: []Version{NewVersion("../v1", ".", apispec.Config[string]{})}, want: `invalid API version "../v1"`},
+			{name: "zero version", versions: []Version{NewVersion("v0", ".", apispec.Config[string]{})}, want: `invalid API version "v0"`},
+			{name: "unconstructed version", versions: []Version{{}}, want: `invalid API version ""`},
+			{name: "duplicate Kotlin namespace", versions: []Version{first, NewVersion("v2", ".", apispec.Config[string]{KotlinPackage: "fixture.v1"})}, want: `duplicate Kotlin package "fixture.v1"`},
+			{name: "unknown language", versions: []Version{first}, languages: []Language{"Rust"}, want: `unknown language "Rust"`},
+			{name: "duplicate language", versions: []Version{first}, languages: []Language{TypeScript, TypeScript}, want: `duplicate language "TypeScript"`},
+			{name: "invalid later specification", versions: []Version{first, NewVersion("v2", ".", apispec.Config[string]{Routes: []apispec.Route{{Name: "broken", Method: "GET", Path: "/"}}})}, want: `version v2: invalid API specification: routes[0] ("broken"): response type is required`},
+			{name: "invalid later namespace", versions: []Version{first, NewVersion("v2", ".", apispec.Config[string]{KotlinPackage: "../escape"})}, want: `version v2: invalid API specification: KotlinPackage "../escape" must be a nonempty dotted package name`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				if err := os.WriteFile(filepath.Join(root, "previous"), []byte("existing output"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				api := NewAPI(root, "FixtureSDK", tc.versions...)
+				api.Languages = tc.languages
+				if err := api.Generate(); err == nil || err.Error() != tc.want {
+					t.Fatalf("Generate = %v; want %s", err, tc.want)
+				}
+				if got := discoveryFiles(t, root); !reflect.DeepEqual(got, map[string]string{"previous": "existing output"}) {
+					t.Fatalf("invalid input changed output: %v", got)
+				}
+			})
+		}
+	})
 }

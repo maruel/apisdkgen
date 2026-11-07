@@ -1,0 +1,7 @@
+{
+  "kotlin": "2.4.21",
+  "okhttp": "4.12.0",
+  "okio": "3.6.0",
+  "coroutines": "1.11.0",
+  "serialization": "1.12.0"
+}

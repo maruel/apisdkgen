@@ -154,10 +154,11 @@ fun main() = runBlocking {
         exchange.close()
     }
     server.start()
-    val cancelledCalls = AtomicInteger()
-    val http = OkHttpClient.Builder().retryOnConnectionFailure(false).eventListener(object : EventListener() {
-        override fun canceled(call: Call) { cancelledCalls.incrementAndGet() }
-    }).build()
+    val burstCall = java.util.concurrent.atomic.AtomicReference<Call>()
+    val http = OkHttpClient.Builder().retryOnConnectionFailure(false).addInterceptor { chain ->
+        if (chain.request().url.queryParameter("cursor") == "burst") burstCall.set(chain.call())
+        chain.proceed(chain.request())
+    }.build()
     try {
         val client = ApiClient("http://127.0.0.1:${server.address.port}", httpClient = http)
         verifyReconnectTiming(client)
@@ -250,9 +251,10 @@ fun main() = runBlocking {
         }
         val burst = withTimeout(3000) { client.plainEvents("burst").buffer(0).onEach { yield() }.toList() }
         check(burst.map { it.kind } == (0 until 100).map { it.toString() }) { "Backpressure lost events" }
-        val cancellations = cancelledCalls.get()
+        val completedBurstCall = requireNotNull(burstCall.get())
         val firstOnly = withTimeout(3000) { client.plainEvents("burst").take(1).toList() }
-        check(firstOnly.single().kind == "0" && cancelledCalls.get() > cancellations)
+        val firstCall = requireNotNull(burstCall.get())
+        check(firstCall !== completedBurstCall && firstOnly.single().kind == "0" && firstCall.isCanceled())
         try {
             withTimeout(3000) { client.plainEvents("malformed").toList() }
             error("Plain stream swallowed decode failure")

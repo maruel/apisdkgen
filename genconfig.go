@@ -147,7 +147,7 @@ func collectNamedContainers[C ~string](c *apispec.Config[C]) ([]reflect.Type, er
 }
 
 // validateSDKTypes owns generated names and the selected targets' cycle policies.
-func validateSDKTypes[C ~string](c *apispec.Config[C], aliases []aliasInfo, out OutputConfig) error {
+func validateSDKTypes[C ~string](c *apispec.Config[C], aliases []aliasInfo, out outputPaths) error {
 	types, err := walkSDKTypes(c, sdkSeedTypes(c))
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func validateSDKTypes[C ~string](c *apispec.Config[C], aliases []aliasInfo, out 
 }
 
 // validateSDKNames checks declaration identity and each selected output namespace.
-func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, types []reflect.Type, out OutputConfig) error {
+func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, types []reflect.Type, out outputPaths) error {
 	aliasNames := map[string]struct{}{}
 	for _, a := range aliases {
 		aliasNames[a.name] = struct{}{}
@@ -318,7 +318,7 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 }
 
 // validateSDKCycles rejects only layouts that the selected native emitters cannot represent.
-func validateSDKCycles[C ~string](c *apispec.Config[C], types []reflect.Type, out OutputConfig) error {
+func validateSDKCycles[C ~string](c *apispec.Config[C], types []reflect.Type, out outputPaths) error {
 	for _, target := range []string{"Kotlin", "Swift"} {
 		if target == "Kotlin" && out.KotlinDir == "" || target == "Swift" && out.SwiftDir == "" {
 			continue

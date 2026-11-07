@@ -390,7 +390,8 @@ func TestDocRegistry(t *testing.T) {
 		t.Run("named events", func(t *testing.T) {
 			t.Parallel()
 
-			outDir := t.TempDir()
+			outDir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
 			docs := &docRegistry[string]{
 				cfg: &apispec.Config[string]{
 					Routes: []apispec.Route{
@@ -410,23 +411,17 @@ func TestDocRegistry(t *testing.T) {
 					ErrorModel: apispec.ClientErrorModel{TypeName: "DifferentError"},
 				},
 			}
-			if err := docs.generateTS(outDir, diskOutput{}); err != nil {
+			if err := docs.generateTS(outDir, out); err != nil {
 				t.Fatal(err)
 			}
-			content, err := fs.ReadFile(os.DirFS(outDir), "api.gen.ts")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "api.gen.ts", string(content))
+			content := out.files[filepath.Join(outDir, "api.gen.ts")]
+			assertGolden(t, "api.gen.ts", content)
 
-			if err := docs.generateMarkdownDoc(outDir, diskOutput{}); err != nil {
+			if err := docs.generateMarkdownDoc(filepath.Join(outDir, "API.md"), out); err != nil {
 				t.Fatal(err)
 			}
-			content, err = fs.ReadFile(os.DirFS(outDir), "API.md")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "API.md", string(content))
+			content = out.files[filepath.Join(outDir, "API.md")]
+			assertGolden(t, "API.md", content)
 		})
 	})
 	t.Run("generateMarkdownDoc", func(t *testing.T) {
@@ -434,7 +429,8 @@ func TestDocRegistry(t *testing.T) {
 
 		t.Run("enum fields retain their type and values", func(t *testing.T) {
 			t.Parallel()
-			outDir := t.TempDir()
+			outDir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
 			quotaType := reflect.TypeFor[testDocProviderQuota]()
 			docs := &docRegistry[string]{
 				cfg: &apispec.Config[string]{
@@ -456,21 +452,19 @@ func TestDocRegistry(t *testing.T) {
 					},
 				}},
 			}
-			if err := docs.generateMarkdownDoc(outDir, diskOutput{}); err != nil {
+			if err := docs.generateMarkdownDoc(filepath.Join(outDir, "API.md"), out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(outDir), "API.md")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "API.md", string(data))
+			data := out.files[filepath.Join(outDir, "API.md")]
+			assertGolden(t, "API.md", data)
 		})
 	})
 	t.Run("writeKotlinClient", func(t *testing.T) {
 		t.Run("MCP", func(t *testing.T) {
 			t.Parallel()
 
-			outDir := t.TempDir()
+			outDir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
 			docs := &docRegistry[string]{
 				cfg: &apispec.Config[string]{
 					Routes: []apispec.Route{
@@ -493,14 +487,11 @@ func TestDocRegistry(t *testing.T) {
 					},
 				},
 			}
-			if err := docs.writeKotlinClient(outDir, diskOutput{}); err != nil {
+			if err := docs.writeKotlinClient(outDir, out); err != nil {
 				t.Fatal(err)
 			}
-			content, err := fs.ReadFile(os.DirFS(outDir), "ApiClient.kt")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "ApiClient.kt", string(content))
+			content := out.files[filepath.Join(outDir, "ApiClient.kt")]
+			assertGolden(t, "ApiClient.kt", content)
 		})
 		t.Run("query routes", func(t *testing.T) {
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{
@@ -510,15 +501,13 @@ func TestDocRegistry(t *testing.T) {
 					{Name: "rawEvents", Path: "/raw-events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true},
 				},
 			}}
-			dir := t.TempDir()
-			if err := d.writeKotlinClient(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.writeKotlinClient(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.kt")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "ApiClient.kt", string(data))
+			data := out.files[filepath.Join(dir, "ApiClient.kt")]
+			assertGolden(t, "ApiClient.kt", data)
 		})
 		t.Run("named events", func(t *testing.T) {
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
@@ -529,15 +518,13 @@ func TestDocRegistry(t *testing.T) {
 				{Name: "ready", Handler: "onReady"},
 			}}
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{KotlinPackage: "example.api", Routes: []apispec.Route{r}}}
-			dir := t.TempDir()
-			if err := d.writeKotlinClient(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.writeKotlinClient(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.kt")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "ApiClient.kt", string(data))
+			data := out.files[filepath.Join(dir, "ApiClient.kt")]
+			assertGolden(t, "ApiClient.kt", data)
 		})
 	})
 	t.Run("emitKotlinStruct", func(t *testing.T) {
@@ -580,30 +567,11 @@ func TestDocRegistry(t *testing.T) {
 	t.Run("generateTSValidate", func(t *testing.T) {
 		t.Parallel()
 
-		t.Run("without SSE routes removes stale file", func(t *testing.T) {
-			t.Parallel()
-
-			outDir := t.TempDir()
-			validatePath := filepath.Join(outDir, "validate.gen.ts")
-			if err := os.WriteFile(validatePath, []byte("stale"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			docs := &docRegistry[string]{
-				cfg: &apispec.Config[string]{},
-			}
-			if err := docs.generateTSValidate(outDir, diskOutput{}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := os.Stat(validatePath); !os.IsNotExist(err) {
-				t.Fatalf("validate.gen.ts exists after generation without SSE Routes: %v", err)
-			}
-		})
-
 		t.Run("with SSE routes writes validator", func(t *testing.T) {
 			t.Parallel()
 
-			outDir := t.TempDir()
+			outDir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
 			eventType := reflect.TypeFor[testSDKEvent]()
 			docs := &docRegistry[string]{
 				cfg: &apispec.Config[string]{
@@ -615,14 +583,11 @@ func TestDocRegistry(t *testing.T) {
 				aliasNames: map[string]struct{}{},
 			}
 
-			if err := docs.generateTSValidate(outDir, diskOutput{}); err != nil {
+			if err := docs.generateTSValidate(outDir, out); err != nil {
 				t.Fatal(err)
 			}
-			content, err := fs.ReadFile(os.DirFS(outDir), "validate.gen.ts")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "validate.gen.ts", string(content))
+			content := out.files[filepath.Join(outDir, "validate.gen.ts")]
+			assertGolden(t, "validate.gen.ts", content)
 		})
 
 		t.Run("discriminated common fields", func(t *testing.T) {
@@ -636,15 +601,13 @@ func TestDocRegistry(t *testing.T) {
 				aliases:    []aliasInfo{{name: "testEnvelopeKind", constants: []aliasConstant{{name: "Text", value: "text"}}}},
 				aliasNames: map[string]struct{}{"testEnvelopeKind": {}},
 			}
-			dir := t.TempDir()
-			if err := d.generateTSValidate(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.generateTSValidate(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "validate.gen.ts", string(data))
+			data := out.files[filepath.Join(dir, "validate.gen.ts")]
+			assertGolden(t, "validate.gen.ts", data)
 		})
 		t.Run("discriminated without enum", func(t *testing.T) {
 			t.Parallel()
@@ -653,15 +616,13 @@ func TestDocRegistry(t *testing.T) {
 				Discriminated:   []string{"testEnvelope"},
 				SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEnvelope]().PkgPath(): {}},
 			}}
-			dir := t.TempDir()
-			if err := d.generateTSValidate(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.generateTSValidate(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "validate.gen.ts")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "validate.gen.ts", string(data))
+			data := out.files[filepath.Join(dir, "validate.gen.ts")]
+			assertGolden(t, "validate.gen.ts", data)
 		})
 	})
 	t.Run("writeSwiftClient", func(t *testing.T) {
@@ -673,15 +634,13 @@ func TestDocRegistry(t *testing.T) {
 					{Name: "rawEvents", Path: "/raw-events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true},
 				},
 			}}
-			dir := t.TempDir()
-			if err := d.writeSwiftClient(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.writeSwiftClient(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.swift")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "ApiClient.swift", string(data))
+			data := out.files[filepath.Join(dir, "ApiClient.swift")]
+			assertGolden(t, "ApiClient.swift", data)
 		})
 		t.Run("named events", func(t *testing.T) {
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
@@ -692,15 +651,13 @@ func TestDocRegistry(t *testing.T) {
 				{Name: "ready", Handler: "onReady"},
 			}}
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{KotlinPackage: "example.api", Routes: []apispec.Route{r}}}
-			dir := t.TempDir()
-			if err := d.writeSwiftClient(dir, diskOutput{}); err != nil {
+			dir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			if err := d.writeSwiftClient(dir, out); err != nil {
 				t.Fatal(err)
 			}
-			data, err := fs.ReadFile(os.DirFS(dir), "ApiClient.swift")
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertGolden(t, "ApiClient.swift", string(data))
+			data := out.files[filepath.Join(dir, "ApiClient.swift")]
+			assertGolden(t, "ApiClient.swift", data)
 		})
 	})
 }
@@ -720,22 +677,20 @@ func TestGenerate(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 				dir := t.TempDir()
-				api := NewAPI(".", OutputConfig{
-					TypeScriptDir: dir,
-					KotlinDir:     dir,
-					SwiftDir:      dir,
-					MarkdownDir:   dir,
-				}, apispec.Config[string]{
+				if err := os.WriteFile(filepath.Join(dir, "stale"), []byte("old output"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", apispec.Config[string]{
 					KotlinPackage:   "fixture.api",
 					Routes:          tc.routes,
 					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
-				})
+				}))
 				if err := api.Generate(); err != nil {
 					t.Fatal(err)
 				}
-				names := []string{"API.md", "ApiClient.kt", "ApiClient.swift", "Types.kt", "Types.swift", "api.gen.ts", "types.gen.ts"}
+				names := []string{"API.v1.md", "kotlin/src/main/kotlin/fixture/api/ApiClient.kt", "swift/Sources/FixtureSDKV1/ApiClient.swift", "kotlin/src/main/kotlin/fixture/api/Types.kt", "swift/Sources/FixtureSDKV1/Types.swift", "ts/v1/api.gen.ts", "ts/v1/types.gen.ts"}
 				if tc.name == "SSE" {
-					names = append(names, "validate.gen.ts")
+					names = append(names, "ts/v1/validate.gen.ts")
 				}
 				for _, name := range names {
 					data, err := fs.ReadFile(os.DirFS(dir), name)
@@ -774,14 +729,11 @@ func TestGenerate(t *testing.T) {
 				{Code: testGeneratedCodeUnknown, Status: 500},
 			},
 		}
-		tsDir := t.TempDir()
-		kotlinDir := t.TempDir()
-		swiftDir := t.TempDir()
-		api := NewAPI(".", OutputConfig{
-			TypeScriptDir: tsDir,
-			KotlinDir:     kotlinDir,
-			SwiftDir:      swiftDir,
-		}, cfg)
+		root := t.TempDir()
+		tsDir := filepath.Join(root, "ts", "v1")
+		kotlinDir := filepath.Join(root, "kotlin", "src", "main", "kotlin", "fixture", "api")
+		swiftDir := filepath.Join(root, "swift", "Sources", "FixtureSDKV1")
+		api := NewAPI(root, "FixtureSDK", NewVersion("v1", ".", cfg))
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
@@ -801,7 +753,7 @@ func TestGenerate(t *testing.T) {
 		}
 		t.Run("compile", func(t *testing.T) {
 			t.Run("TypeScript", func(t *testing.T) {
-				cmd := exec.CommandContext(t.Context(), "tsc", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "api.gen.ts", "types.gen.ts")
+				cmd := exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "api.gen.ts", "types.gen.ts")
 				cmd.Dir = tsDir
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("TypeScript fixture compilation failed: %v\n%s", err, out)
@@ -854,7 +806,9 @@ func TestGenerate(t *testing.T) {
 			ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse", TSDetailsExpr: "undefined"},
 			Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Req: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent](), QueryFromReq: true, QueryParams: []string{"limit"}, HeadersArg: true}},
 		}
-		api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+		api.Languages = []Language{TypeScript}
+		dir = filepath.Join(dir, "ts", "v1")
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
@@ -875,9 +829,12 @@ void main();
 		if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(consumer), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		runtimeDir := t.TempDir()
 		for _, cmd := range []*exec.Cmd{
-			exec.CommandContext(t.Context(), "tsc", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "commonjs", "consumer.ts"),
-			exec.CommandContext(t.Context(), "node", "consumer.js"),
+			// #nosec G204 G702 -- The compiler and flags are fixed; runtimeDir is an isolated test output directory.
+			exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts"),
+			// #nosec G204 G702 -- Execute the compiled test fixture without a shell.
+			exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js")),
 		} {
 			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -909,7 +866,9 @@ void main();
 					cfg.ErrorCodes = []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: testGeneratedCodeUnknown, Status: 500}}
 				}
 				dir := t.TempDir()
-				api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+				api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{TypeScript}
+				dir = filepath.Join(dir, "ts", "v1")
 				if err := api.Generate(); err != nil {
 					t.Fatal(err)
 				}
@@ -921,7 +880,7 @@ console.log(client, new APIError(500, "UNKNOWN"));
 				if err := os.WriteFile(path, []byte(consumer), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				cmd := exec.CommandContext(t.Context(), "tsc", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "consumer.ts")
+				cmd := exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--noEmit", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "bundler", "consumer.ts")
 				cmd.Dir = dir
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("strict consumer compilation failed: %v\n%s", err, out)
@@ -951,7 +910,9 @@ console.log(client, new APIError(500, "UNKNOWN"));
 				{Name: "rawEvents", Path: "/raw-events", Resp: eventType, IsSSE: true},
 			},
 		}
-		api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+		api.Languages = []Language{TypeScript}
+		dir = filepath.Join(dir, "ts", "v1")
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
@@ -1025,9 +986,12 @@ if (false) client.rawEvents("", handlers);
 		if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(consumer), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		runtimeDir := t.TempDir()
 		for _, cmd := range []*exec.Cmd{
-			exec.CommandContext(t.Context(), "tsc", "--strict", "--target", "ES2022", "--module", "commonjs", "consumer.ts"),
-			exec.CommandContext(t.Context(), "node", "consumer.js"),
+			// #nosec G204 G702 -- The compiler and flags are fixed; runtimeDir is an isolated test output directory.
+			exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts"),
+			// #nosec G204 G702 -- Execute the compiled test fixture without a shell.
+			exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js")),
 		} {
 			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -1065,7 +1029,9 @@ if (false) client.rawEvents("", handlers);
 				{Name: "ready", Handler: "onReady"},
 			}}, {Name: "plainEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}}, {Name: "getEvent", Method: "GET", Path: "/event", Resp: eventType}},
 		}
-		api := NewAPI(".", OutputConfig{KotlinDir: dir}, cfg)
+		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+		api.Languages = []Language{Kotlin}
+		dir = filepath.Join(dir, "kotlin", "src", "main", "kotlin", cfg.KotlinPackage)
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}
@@ -1114,7 +1080,9 @@ if (false) client.rawEvents("", handlers);
 				{Name: "ready", Handler: "onReady"},
 			}}, {Name: "plainEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}}},
 		}
-		api := NewAPI(".", OutputConfig{SwiftDir: dir}, cfg)
+		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+		api.Languages = []Language{Swift}
+		dir = filepath.Join(dir, "swift", "Sources", "FixtureSDKV1")
 		if err := api.Generate(); err != nil {
 			t.Fatal(err)
 		}

@@ -21,6 +21,39 @@ object InstantSerializer : KSerializer<Instant> {
     override fun deserialize(decoder: Decoder): Instant = Instant.parse(decoder.decodeString())
 }
 
+@Serializable(with = LanguageSerializer::class)
+sealed interface Language {
+    val value: String
+    @Serializable
+    data object Kotlin : Language {
+        override val value = "Kotlin"
+    }
+    @Serializable
+    data object Swift : Language {
+        override val value = "Swift"
+    }
+    @Serializable
+    data object TypeScript : Language {
+        override val value = "TypeScript"
+    }
+    @Serializable
+    data class Other(override val value: String) : Language
+}
+
+object LanguageSerializer : KSerializer<Language> {
+    override val descriptor = PrimitiveSerialDescriptor("Language", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: Language) = encoder.encodeString(value.value)
+    override fun deserialize(decoder: Decoder): Language {
+        val v = decoder.decodeString()
+        return when (v) {
+            "Kotlin" -> Language.Kotlin
+            "Swift" -> Language.Swift
+            "TypeScript" -> Language.TypeScript
+            else -> Language.Other(v)
+        }
+    }
+}
+
 @Serializable(with = testDocAuthKindSerializer::class)
 sealed interface testDocAuthKind {
     val value: String

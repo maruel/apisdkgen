@@ -9,7 +9,7 @@ readonly repo_root
 deps="$repo_root/.test-deps"
 readonly deps
 
-for tool in curl gpg java npm tar unzip; do
+for tool in curl gpg java npm python3 tar unzip; do
   command -v "$tool" >/dev/null || {
     printf 'Required command missing: %s\n' "$tool" >&2
     exit 1
@@ -30,7 +30,38 @@ download() {
   fi
 }
 
-kotlin_version=2.4.21
+# The generated package manifests and this test classpath share one version owner.
+python3 - "$repo_root/kotlin-dependencies.json" >"$work_dir/kotlin-deps" <<'PYTHON'
+import json
+import sys
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class KotlinDependencies:
+    kotlin: str
+    okhttp: str
+    okio: str
+    coroutines: str
+    serialization: str
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    deps = KotlinDependencies(**json.load(source))
+print(deps.kotlin)
+for group, artifact, version in [
+    ("com.squareup.okhttp3", "okhttp", deps.okhttp),
+    ("com.squareup.okhttp3", "okhttp-sse", deps.okhttp),
+    ("com.squareup.okio", "okio-jvm", deps.okio),
+    ("org.jetbrains.kotlinx", "kotlinx-coroutines-core-jvm", deps.coroutines),
+    ("org.jetbrains.kotlinx", "kotlinx-coroutines-test-jvm", deps.coroutines),
+    ("org.jetbrains.kotlinx", "kotlinx-serialization-core-jvm", deps.serialization),
+    ("org.jetbrains.kotlinx", "kotlinx-serialization-json-jvm", deps.serialization),
+]:
+    print(group, artifact, version)
+PYTHON
+read -r kotlin_version <"$work_dir/kotlin-deps"
+tail -n +2 "$work_dir/kotlin-deps" >"$work_dir/kotlin-runtime"
 if [[ ! -x "$deps/kotlin-$kotlin_version/bin/kotlinc" ]]; then
   download "https://github.com/JetBrains/kotlin/releases/download/v$kotlin_version/kotlin-compiler-$kotlin_version.zip" "$work_dir/kotlin.zip"
   unzip -q "$work_dir/kotlin.zip" -d "$work_dir/kotlin"
@@ -47,17 +78,14 @@ while read -r group artifact version; do
   download "https://repo.maven.apache.org/maven2/${group//.//}/$artifact/$version/$jar" "$deps/jars/$jar"
   jars+=("jars/$jar")
   for old in "$deps/jars/$artifact-"*.jar; do
-    if [[ "$old" != "$deps/jars/$jar" ]]; then old_jars+=("$old"); fi
+    # A numeric version distinguishes okhttp releases from okhttp-sse artifacts.
+    case "${old##*/}" in
+    "$artifact"-[0-9]*.jar)
+      if [[ "$old" != "$deps/jars/$jar" ]]; then old_jars+=("$old"); fi
+      ;;
+    esac
   done
-done <<'JARS'
-com.squareup.okhttp3 okhttp-jvm 5.5.1
-com.squareup.okhttp3 okhttp-sse 5.5.1
-com.squareup.okio okio-jvm 3.18.1
-org.jetbrains.kotlinx kotlinx-coroutines-core-jvm 1.11.0
-org.jetbrains.kotlinx kotlinx-coroutines-test-jvm 1.11.0
-org.jetbrains.kotlinx kotlinx-serialization-core-jvm 1.12.0
-org.jetbrains.kotlinx kotlinx-serialization-json-jvm 1.12.0
-JARS
+done <"$work_dir/kotlin-runtime"
 
 # Publish only the pinned, completely downloaded JARs; unrelated cached JARs
 # must not enter the compiler or runtime classpath.

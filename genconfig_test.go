@@ -120,8 +120,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 				if tc.special {
 					cfg.SpecialTypes = []apispec.SpecialType{{Type: reflect.TypeFor[testRecursiveSlice](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}}
 				}
-				output := discoveryOutput(tc.target, dir)
-				api := NewAPI(".", output, cfg)
+				api := newDiscoveryAPI(tc.target, dir, cfg)
 				if err := api.Generate(); err != nil {
 					t.Fatal(err)
 				}
@@ -153,7 +152,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 				if special {
 					cfg.SpecialTypes = []apispec.SpecialType{{Type: reflect.TypeFor[testRecursiveSlice](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}}
 				}
-				api := NewAPI(".", discoveryOutput(target, dir), cfg)
+				api := newDiscoveryAPI(target, dir, cfg)
 				if err := api.Generate(); err != nil {
 					t.Fatal(err)
 				}
@@ -169,14 +168,14 @@ func TestSDKTypeDiscovery(t *testing.T) {
 			extra  reflect.Type
 			want   string
 		}{
-			{"recursive slice Kotlin", reflect.TypeFor[testRecursiveSlice](), "Kotlin", nil, "invalid SDK types: Kotlin does not support recursive container alias apisdkgen.testRecursiveSlice"},
-			{"recursive map Swift", reflect.TypeFor[testRecursiveMap](), "Swift", nil, "invalid SDK types: Swift does not support recursive container alias apisdkgen.testRecursiveMap"},
-			{"inline node Swift", reflect.TypeFor[testRecursiveNode](), "Swift", nil, "invalid SDK types: unsupported Swift inline recursive struct apisdkgen.testRecursiveNode"},
-			{"reflected name collision", reflect.TypeFor[ClientScope](), "TypeScript", reflect.TypeFor[apispec.ClientScope](), "invalid SDK types: generated type name \"ClientScope\" is shared by apisdkgen.ClientScope and apispec.ClientScope"},
-			{"TypeScript HTTP global", reflect.TypeFor[Response](), "TypeScript", nil, "invalid SDK types: TypeScript type name \"Response\" conflicts with a generated declaration"},
-			{"TypeScript runtime name", reflect.TypeFor[APIClient](), "TypeScript", nil, "invalid SDK types: TypeScript type name \"APIClient\" conflicts with a generated declaration"},
-			{"Swift runtime name", reflect.TypeFor[JSONValue](), "Swift", nil, "invalid SDK types: generated Swift type name \"JSONValue\" conflicts with a generated declaration"},
-			{"Kotlin serializer name", reflect.TypeFor[testDocAuthKindSerializer](), "Kotlin", nil, "invalid SDK types: generated Kotlin type name \"testDocAuthKindSerializer\" conflicts with a generated declaration"},
+			{"recursive slice Kotlin", reflect.TypeFor[testRecursiveSlice](), "Kotlin", nil, "version v1: invalid SDK types: Kotlin does not support recursive container alias apisdkgen.testRecursiveSlice"},
+			{"recursive map Swift", reflect.TypeFor[testRecursiveMap](), "Swift", nil, "version v1: invalid SDK types: Swift does not support recursive container alias apisdkgen.testRecursiveMap"},
+			{"inline node Swift", reflect.TypeFor[testRecursiveNode](), "Swift", nil, "version v1: invalid SDK types: unsupported Swift inline recursive struct apisdkgen.testRecursiveNode"},
+			{"reflected name collision", reflect.TypeFor[ClientScope](), "TypeScript", reflect.TypeFor[apispec.ClientScope](), "version v1: invalid SDK types: generated type name \"ClientScope\" is shared by apisdkgen.ClientScope and apispec.ClientScope"},
+			{"TypeScript HTTP global", reflect.TypeFor[Response](), "TypeScript", nil, "version v1: invalid SDK types: TypeScript type name \"Response\" conflicts with a generated declaration"},
+			{"TypeScript runtime name", reflect.TypeFor[APIClient](), "TypeScript", nil, "version v1: invalid SDK types: TypeScript type name \"APIClient\" conflicts with a generated declaration"},
+			{"Swift runtime name", reflect.TypeFor[JSONValue](), "Swift", nil, "version v1: invalid SDK types: generated Swift type name \"JSONValue\" conflicts with a generated declaration"},
+			{"Kotlin serializer name", reflect.TypeFor[testDocAuthKindSerializer](), "Kotlin", nil, "version v1: invalid SDK types: generated Kotlin type name \"testDocAuthKindSerializer\" conflicts with a generated declaration"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -186,7 +185,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 					cfg.ExtraSeeds = append(cfg.ExtraSeeds, tc.extra)
 					cfg.SDKPackagePaths[tc.extra.PkgPath()] = struct{}{}
 				}
-				api := NewAPI(".", discoveryOutput(tc.target, dir), cfg)
+				api := newDiscoveryAPI(tc.target, dir, cfg)
 				if err := api.Generate(); err == nil || err.Error() != tc.want {
 					t.Fatalf("Generate() = %v; want %q", err, tc.want)
 				}
@@ -199,8 +198,8 @@ func TestSDKTypeDiscovery(t *testing.T) {
 	t.Run("unconfigured recursive container", func(t *testing.T) {
 		cfg := discoveryConfig(reflect.TypeFor[testRecursiveMap]())
 		cfg.SDKPackagePaths = nil
-		api := NewAPI(".", OutputConfig{TypeScriptDir: filepath.Join(t.TempDir(), "sdk")}, cfg)
-		const want = "invalid SDK types: recursive container apisdkgen.testRecursiveMap must belong to an SDK package or have a SpecialType mapping"
+		api := newDiscoveryAPI("TypeScript", filepath.Join(t.TempDir(), "sdk"), cfg)
+		const want = "version v1: invalid SDK types: recursive container apisdkgen.testRecursiveMap must belong to an SDK package or have a SpecialType mapping"
 		if err := api.Generate(); err == nil || err.Error() != want {
 			t.Fatalf("Generate() = %v; want %q", err, want)
 		}
@@ -208,8 +207,8 @@ func TestSDKTypeDiscovery(t *testing.T) {
 	t.Run("validator helper name", func(t *testing.T) {
 		cfg := discoveryConfig(reflect.TypeFor[ValidatorInput]())
 		cfg.Routes[0].IsSSE = true
-		api := NewAPI(".", OutputConfig{TypeScriptDir: filepath.Join(t.TempDir(), "sdk")}, cfg)
-		const want = "invalid SDK types: TypeScript type name \"ValidatorInput\" conflicts with a generated declaration"
+		api := newDiscoveryAPI("TypeScript", filepath.Join(t.TempDir(), "sdk"), cfg)
+		const want = "version v1: invalid SDK types: TypeScript type name \"ValidatorInput\" conflicts with a generated declaration"
 		if err := api.Generate(); err == nil || err.Error() != want {
 			t.Fatalf("Generate() = %v; want %q", err, want)
 		}
@@ -220,13 +219,13 @@ func TestSDKTypeDiscovery(t *testing.T) {
 			codes        []apispec.ErrorCodeSpec[testGeneratedErrorCode]
 			want         string
 		}{
-			{"Kotlin catchall", "Kotlin", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "OTHER", Status: 400}}, "invalid SDK types: generated Kotlin enum member \"testGeneratedErrorCode.Other\" conflicts with a generated declaration"},
-			{"TypeScript constant name", "TypeScript", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "A_B", Status: 400}, {Code: "A__B", Status: 401}}, "invalid SDK types: TypeScript value name \"testGeneratedErrorCodeAB\" is duplicated"},
+			{"Kotlin catchall", "Kotlin", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "OTHER", Status: 400}}, "version v1: invalid SDK types: generated Kotlin enum member \"testGeneratedErrorCode.Other\" conflicts with a generated declaration"},
+			{"TypeScript constant name", "TypeScript", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "A_B", Status: 400}, {Code: "A__B", Status: 401}}, "version v1: invalid SDK types: TypeScript value name \"testGeneratedErrorCodeAB\" is duplicated"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				cfg := discoveryConfig(reflect.TypeFor[testSDKEvent]())
 				cfg.ErrorCodes = tc.codes
-				api := NewAPI(".", discoveryOutput(tc.target, filepath.Join(t.TempDir(), "sdk")), cfg)
+				api := newDiscoveryAPI(tc.target, filepath.Join(t.TempDir(), "sdk"), cfg)
 				if err := api.Generate(); err == nil || err.Error() != tc.want {
 					t.Fatalf("Generate() = %v; want %q", err, tc.want)
 				}
@@ -293,28 +292,28 @@ func discoveryConfig(seed reflect.Type) apispec.Config[testGeneratedErrorCode] {
 		KotlinPackage:   "fixture",
 	}
 }
-func discoveryOutput(target, dir string) OutputConfig {
-	switch target {
-	case "TypeScript":
-		return OutputConfig{TypeScriptDir: dir}
-	case "Kotlin":
-		return OutputConfig{KotlinDir: dir}
-	default:
-		return OutputConfig{SwiftDir: dir}
-	}
+func newDiscoveryAPI(target, dir string, cfg apispec.Config[testGeneratedErrorCode]) API {
+	api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+	api.Languages = []Language{Language(target)}
+	return api
 }
 func discoveryFiles(t *testing.T, dir string) map[string]string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	files := map[string]string{}
-	for _, entry := range entries {
-		data, err := fs.ReadFile(os.DirFS(dir), entry.Name())
+	if err := fs.WalkDir(os.DirFS(dir), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		files[entry.Name()] = string(data)
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(os.DirFS(dir), path)
+		if err != nil {
+			return err
+		}
+		files[path] = string(data)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	return files
 }
@@ -322,8 +321,10 @@ func compileDiscovery(t *testing.T, target, dir string) {
 	var cmd *exec.Cmd
 	switch target {
 	case "TypeScript":
-		cmd = exec.CommandContext(t.Context(), "tsc", "--strict", "--noEmit", "--target", "ES2022", "types.gen.ts", "api.gen.ts")
+		dir = filepath.Join(dir, "ts", "v1")
+		cmd = exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--noEmit", "--target", "ES2022", "types.gen.ts", "api.gen.ts")
 	case "Kotlin":
+		dir = filepath.Join(dir, "kotlin", "src", "main", "kotlin", "fixture")
 		cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
 		if cp == "" {
 			t.Skip("run make test to configure Kotlin dependencies")
@@ -331,6 +332,7 @@ func compileDiscovery(t *testing.T, target, dir string) {
 		// #nosec G204 G702 -- Compiler dependencies are explicit local test inputs; no shell is used.
 		cmd = exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN"), "Types.kt", "-d", "types.jar")
 	case "Swift":
+		dir = filepath.Join(dir, "swift", "Sources", "FixtureSDKV1")
 		if _, err := exec.LookPath("swiftc"); err != nil {
 			t.Skip("run make test to configure Swift")
 		}

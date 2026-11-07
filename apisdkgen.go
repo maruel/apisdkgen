@@ -7,10 +7,9 @@
 package apisdkgen
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,16 +18,15 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
-// OutputConfig names the generated output directories for each target.
-type OutputConfig struct {
+type outputPaths struct {
 	TypeScriptDir string
 	KotlinDir     string
 	SwiftDir      string
-	MarkdownDir   string
+	MarkdownFile  string
 }
 
 // validate checks emitter requirements after Config.Validate succeeds.
-func (o *OutputConfig) validate[C ~string](cfg *apispec.Config[C]) error {
+func (o *outputPaths) validate[C ~string](cfg *apispec.Config[C]) error {
 	if o.KotlinDir != "" {
 		for _, part := range strings.Split(cfg.KotlinPackage, ".") {
 			if !isIdentifier(part) {
@@ -105,7 +103,7 @@ func (o *OutputConfig) validate[C ~string](cfg *apispec.Config[C]) error {
 	return nil
 }
 
-func (o *OutputConfig) validateRoute(route *apispec.Route) error {
+func (o *outputPaths) validateRoute(route *apispec.Route) error {
 	parameters := map[string]struct{}{}
 	for _, name := range extractPathParams(route.Path) {
 		parameters[name] = struct{}{}
@@ -147,75 +145,117 @@ func (o *OutputConfig) validateRoute(route *apispec.Route) error {
 	return nil
 }
 
-// API describes one API surface to generate.
-type API struct {
-	generate func(OutputConfig, outputSink) error
-	output   OutputConfig
+// Language selects a generated client language.
+type Language string
+
+const (
+	// Kotlin generates a Kotlin JVM package.
+	Kotlin Language = "Kotlin"
+	// Swift generates a Swift package.
+	Swift Language = "Swift"
+	// TypeScript generates a TypeScript package.
+	TypeScript Language = "TypeScript"
+)
+
+// Version describes one typed API specification in a generated package.
+type Version struct {
+	name          string
+	kotlinPackage string
+	render        func(outputPaths, *preparedOutput) error
 }
 
-// NewAPI constructs an SDK generation target from a typed API specification.
+// NewVersion constructs one version from its name, Go source directory, and specification.
+// Version names use v followed by a positive major number, such as v1 or v2.
 // The caller must not mutate maps, slices, or referenced values in config after
 // construction; Generate and Verify read that immutable specification each time.
-func NewAPI[C ~string](sourceDir string, output OutputConfig, config apispec.Config[C]) API {
-	return API{output: output, generate: func(out OutputConfig, sink outputSink) error {
-		return generateAPI(sourceDir, out, config, sink)
+func NewVersion[C ~string](version, sourceDir string, config apispec.Config[C]) Version {
+	return Version{name: version, kotlinPackage: config.KotlinPackage, render: func(out outputPaths, sink *preparedOutput) error {
+		return generateVersion(sourceDir, out, config, sink)
 	}}
 }
 
-// Generate writes configured SDK outputs for one API surface.
-// Specification metadata is validated before any output is written.
-func (api *API) Generate() error {
-	return api.generate(api.output, diskOutput{})
+// API describes a complete generated SDK package containing one or more versions.
+type API struct {
+	// Languages selects client languages. An empty slice generates every language.
+	// API references are always generated.
+	Languages []Language
+
+	outputDir string
+	name      string
+	versions  []Version
 }
 
-// Verify reports missing, changed, and obsolete generated files without modifying outputs.
-// Files bearing the generator's header in configured output directories are owned
-// by the generator. The TypeScript validator is also owned when no longer generated.
-// Other files are ignored. Differences are returned as an error.
-func (api *API) Verify() error {
-	out := &verifyOutput{expected: map[string]map[string]struct{}{}}
-	for _, dir := range []string{api.output.TypeScriptDir, api.output.KotlinDir, api.output.SwiftDir, api.output.MarkdownDir} {
-		if dir != "" {
-			out.expected[filepath.Clean(dir)] = map[string]struct{}{}
+// NewAPI constructs a package with one generator-owned output directory.
+// Name is an identifier such as VoiceGatewaySDK and names its Swift package.
+// All contents of outputDir are generated, including language package manifests.
+func NewAPI(outputDir, name string, versions ...Version) API {
+	return API{outputDir: filepath.Clean(outputDir), name: name, versions: slices.Clone(versions)}
+}
+
+// Generate prepares every version and manifest, then clears and rebuilds the package.
+// Preparation errors leave existing output unchanged. Publication errors may leave
+// incomplete output; fix the error and rerun Generate to rebuild the package.
+func (api *API) Generate() error {
+	out, err := api.prepare()
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(api.outputDir); err != nil {
+		return fmt.Errorf("clear output directory %s: %w", api.outputDir, err)
+	}
+	for _, path := range out.paths() {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(out.files[path]), 0o600); err != nil {
+			return err
 		}
 	}
-	if err := api.generate(api.output, out); err != nil {
+	return nil
+}
+
+// Verify reports missing, changed, and unexpected package entries without changing output.
+func (api *API) Verify() error {
+	prepared, err := api.prepare()
+	if err != nil {
 		return fmt.Errorf("generate for verification: %w", err)
 	}
-	for original, expected := range out.expected {
-		entries, err := os.ReadDir(original)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
+	if info, err := os.Lstat(api.outputDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("SDK output is stale:\nchanged: %s", api.outputDir)
+	}
+	out := &verifyOutput{expected: map[string]struct{}{}}
+	for _, path := range prepared.paths() {
+		out.expectDirectory(filepath.Dir(path))
+		if err := out.checkFile(path, prepared.files[path]); err != nil {
+			return err
+		}
+	}
+	dir := api.outputDir
+	err = fs.WalkDir(os.DirFS(dir), ".", func(name string, entry fs.DirEntry, err error) error {
+		path := filepath.Join(dir, name)
+		if errors.Is(err, os.ErrNotExist) && path == dir {
+			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read output directory %s: %w", original, err)
+			return err
 		}
-		for _, entry := range entries {
-			if _, ok := expected[entry.Name()]; ok || !entry.Type().IsRegular() {
-				continue
-			}
-			path := filepath.Join(original, entry.Name())
-			if api.output.TypeScriptDir != "" && filepath.Clean(api.output.TypeScriptDir) == original && entry.Name() == "validate.gen.ts" {
-				out.differences = append(out.differences, "obsolete: "+path)
-				continue
-			}
-			f, err := os.Open(path) //nolint:gosec // The configured output path is supplied by the caller.
-			if err != nil {
-				return fmt.Errorf("open %s: %w", path, err)
-			}
-			var header [64]byte
-			n, readErr := f.Read(header[:])
-			closeErr := f.Close()
-			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				return fmt.Errorf("read %s: %w", path, readErr)
-			}
-			if closeErr != nil {
-				return fmt.Errorf("close %s: %w", path, closeErr)
-			}
-			if bytes.HasPrefix(header[:n], []byte("// Code generated by gen-api-sdk. DO NOT EDIT.")) || bytes.HasPrefix(header[:n], []byte("<!-- Code generated by gen-api-sdk; DO NOT EDIT. -->")) {
-				out.differences = append(out.differences, "obsolete: "+path)
-			}
+		if entry.IsDir() && slices.Contains([]string{"kotlin/.gradle", "kotlin/.kotlin", "kotlin/build", "swift/.build", "swift/.swiftpm", "ts/node_modules"}, filepath.ToSlash(name)) {
+			return filepath.SkipDir
 		}
+		if _, ok := out.expected[path]; ok {
+			if _, file := prepared.files[path]; !file && entry.Type()&os.ModeSymlink != 0 {
+				out.differences = append(out.differences, "changed: "+path)
+			}
+			return nil
+		}
+		out.differences = append(out.differences, "obsolete: "+path)
+		if entry.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("read output directory %s: %w", dir, err)
 	}
 	if len(out.differences) != 0 {
 		slices.Sort(out.differences)
@@ -224,35 +264,124 @@ func (api *API) Verify() error {
 	return nil
 }
 
-type outputSink interface {
-	mkdir(string) error
-	write(string, string) error
-	remove(string) error
-}
-
-type diskOutput struct{}
-
-func (diskOutput) mkdir(dir string) error { return os.MkdirAll(dir, 0o750) }
-func (diskOutput) write(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o600)
-}
-func (diskOutput) remove(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+func (api *API) prepare() (*preparedOutput, error) {
+	if api.outputDir == "" || api.outputDir == "." || filepath.Dir(api.outputDir) == api.outputDir {
+		return nil, errors.New("output directory must be a non-root package directory")
 	}
+	if len(api.name) == 0 || len(api.name) > 214 {
+		return nil, fmt.Errorf("invalid package name %q", api.name)
+	}
+	for i, c := range api.name {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (i == 0 || c < '0' || c > '9') {
+			return nil, fmt.Errorf("invalid package name %q", api.name)
+		}
+	}
+	if len(api.versions) == 0 {
+		return nil, errors.New("at least one API version is required")
+	}
+	langs := api.Languages
+	if len(langs) == 0 {
+		langs = []Language{Kotlin, Swift, TypeScript}
+	}
+	for i, lang := range langs {
+		if lang != Kotlin && lang != Swift && lang != TypeScript {
+			return nil, fmt.Errorf("unknown language %q", lang)
+		}
+		if slices.Contains(langs[:i], lang) {
+			return nil, fmt.Errorf("duplicate language %q", lang)
+		}
+	}
+	versions := slices.Clone(api.versions)
+	slices.SortFunc(versions, func(a, b Version) int { return strings.Compare(a.name, b.name) })
+	packages := map[string]struct{}{}
+	for i, version := range versions {
+		if !validVersion(version.name) || version.render == nil {
+			return nil, fmt.Errorf("invalid API version %q", version.name)
+		}
+		if i > 0 && versions[i-1].name == version.name {
+			return nil, fmt.Errorf("duplicate API version %q", version.name)
+		}
+		if slices.Contains(langs, Kotlin) {
+			if _, ok := packages[version.kotlinPackage]; ok {
+				return nil, fmt.Errorf("duplicate Kotlin package %q", version.kotlinPackage)
+			}
+			packages[version.kotlinPackage] = struct{}{}
+		}
+	}
+	out := &preparedOutput{files: map[string]string{}}
+	for _, version := range versions {
+		paths := outputPaths{MarkdownFile: filepath.Join(api.outputDir, "API."+version.name+".md")}
+		if slices.Contains(langs, TypeScript) {
+			paths.TypeScriptDir = filepath.Join(api.outputDir, "ts", version.name)
+		}
+		if slices.Contains(langs, Kotlin) {
+			paths.KotlinDir = filepath.Join(api.outputDir, "kotlin", "src", "main", "kotlin", filepath.FromSlash(strings.ReplaceAll(version.kotlinPackage, ".", "/")))
+		}
+		if slices.Contains(langs, Swift) {
+			paths.SwiftDir = filepath.Join(api.outputDir, "swift", "Sources", api.name+strings.ToUpper(version.name))
+		}
+		if err := version.render(paths, out); err != nil {
+			return nil, fmt.Errorf("version %s: %w", version.name, err)
+		}
+	}
+	if err := generateManifests(api, versions, langs, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func validVersion(name string) bool {
+	if len(name) < 2 || name[0] != 'v' || name[1] < '1' || name[1] > '9' {
+		return false
+	}
+	for _, c := range name[2:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// preparedOutput owns the complete file set before publishing any changes.
+type preparedOutput struct{ files map[string]string }
+
+func (out *preparedOutput) write(path, content string) error {
+	path = filepath.Clean(path)
+	if _, ok := out.files[path]; ok {
+		return fmt.Errorf("duplicate output file %s", path)
+	}
+	out.files[path] = content
 	return nil
+}
+func (out *preparedOutput) paths() []string {
+	paths := make([]string, 0, len(out.files))
+	for path := range out.files {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 type verifyOutput struct {
-	expected    map[string]map[string]struct{}
+	expected    map[string]struct{}
 	differences []string
 }
 
-func (*verifyOutput) mkdir(string) error  { return nil }
-func (*verifyOutput) remove(string) error { return nil }
-func (out *verifyOutput) write(path, content string) error {
+func (out *verifyOutput) expectDirectory(dir string) {
+	for dir = filepath.Clean(dir); ; dir = filepath.Dir(dir) {
+		out.expected[dir] = struct{}{}
+		if filepath.Dir(dir) == dir || dir == "." {
+			return
+		}
+	}
+}
+func (out *verifyOutput) checkFile(path, content string) error {
 	path = filepath.Clean(path)
-	out.expected[filepath.Dir(path)][filepath.Base(path)] = struct{}{}
+	out.expected[path] = struct{}{}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		out.differences = append(out.differences, "changed: "+path)
+		return nil
+	}
 	got, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -265,7 +394,7 @@ func (out *verifyOutput) write(path, content string) error {
 	return nil
 }
 
-func generateAPI[C ~string](sourceDir string, output OutputConfig, config apispec.Config[C], sink outputSink) error {
+func generateVersion[C ~string](sourceDir string, output outputPaths, config apispec.Config[C], sink *preparedOutput) error {
 	if err := config.Validate(); err != nil {
 		return fmt.Errorf("invalid API specification: %w", err)
 	}
@@ -302,8 +431,8 @@ func generateAPI[C ~string](sourceDir string, output OutputConfig, config apispe
 			return err
 		}
 	}
-	if output.MarkdownDir != "" {
-		if err := docs.generateMarkdownDoc(output.MarkdownDir, sink); err != nil {
+	if output.MarkdownFile != "" {
+		if err := docs.generateMarkdownDoc(output.MarkdownFile, sink); err != nil {
 			return err
 		}
 	}

@@ -1,0 +1,9 @@
+{
+  "name": "fixturesdk",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./v1/*": "./v1/*.ts",
+    "./v2/*": "./v2/*.ts"
+  }
+}
