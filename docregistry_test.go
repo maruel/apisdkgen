@@ -934,7 +934,7 @@ if (false) client.rawEvents("", handlers);
 				{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
 				{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[testSSEError]()},
 				{Name: "ready", Handler: "onReady"},
-			}}},
+			}}, {Name: "plainEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}}, {Name: "getEvent", Method: "GET", Path: "/event", Resp: eventType}},
 		}
 		api := NewAPI(".", OutputConfig{KotlinDir: dir}, cfg)
 		if err := api.Generate(); err != nil {

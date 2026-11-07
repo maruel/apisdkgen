@@ -10,6 +10,7 @@ import Foundation
             framed.append(event.kind)
         }
         precondition(framed == ["bom", "雪", "last"] && ready == 1, "Frame boundaries must preserve dispatch")
+        precondition(Transport.task?.state != .suspended, "EOF must release the response task")
         var plain: [String] = []
         for try await event in client.plainEvents(cursor: "plain") { plain.append(event.kind) }
         precondition(plain == ["雪", "last"], "Plain streams frame multiline data and discard decode failures")
@@ -55,14 +56,36 @@ import Foundation
         var recovered = client.eventsReconnecting(cursor: "transport").makeAsyncIterator()
         let value = try await recovered.next()
         precondition(value?.kind == "recovered" && Transport.transportCount == 2)
+        var failingRead = client.events(cursor: "read-failure").makeAsyncIterator()
+        let beforeFailure = try await failingRead.next()
+        precondition(beforeFailure?.kind == "before-failure")
+        do { _ = try await failingRead.next(); preconditionFailure("Read failure did not terminate iteration") }
+        catch { precondition(Transport.task?.state != .suspended, "Read failure must release the task") }
+        try await consumeOne(client)
+        precondition(Transport.task?.state != .suspended, "Stopping consumption must release the response task")
+        let opening = _Concurrency.Task {
+            var pending = client.events(cursor: "opening").makeAsyncIterator()
+            _ = try await pending.next()
+        }
+        await Transport.openStarted.wait()
+        opening.cancel()
+        await Transport.releaseOpen.signal()
+        do { _ = try await opening.value; preconditionFailure("Cancelled open delivered a value") }
+        catch { precondition(Transport.task?.state != .suspended, "Pre-install cancellation must cancel the returned task") }
         let blocked = _Concurrency.Task {
             var idle = client.events(cursor: "idle").makeAsyncIterator()
             _ = try await idle.next()
         }
-        try await _Concurrency.Task.sleep(nanoseconds: 30_000_000)
+        await Transport.readStarted.wait()
         blocked.cancel()
         _ = await blocked.result
         precondition(Transport.task?.state != .suspended, "Cancellation must cancel the response task")
         print("PASS: generated Swift lossless pull, typed controls, ID-only/empty reset, EOF/transport reconnect, terminal decode and cancellation")
+    }
+
+    private static func consumeOne(_ client: ApiClient) async throws {
+        var iterator: AsyncThrowingStream<testSDKEvent, Error>.Iterator? = client.events(cursor: "framing").makeAsyncIterator()
+        _ = try await iterator?.next()
+        iterator = nil
     }
 }

@@ -1,4 +1,4 @@
-// Exercises generated Kotlin named SSE dispatch and reconnect framing over HTTP.
+// Exercises generated Kotlin HTTP completion, stream ownership, framing and reconnects.
 package nativecheck
 
 import com.sun.net.httpserver.HttpServer
@@ -7,10 +7,28 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
+import okhttp3.OkHttpClient
+import okhttp3.Call
+import okhttp3.EventListener
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.BufferedSource
+import okio.Source
+import okio.Timeout
+import okio.buffer
 
 fun main() = runBlocking {
     val requests = AtomicInteger()
@@ -19,6 +37,18 @@ fun main() = runBlocking {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.createContext("/events") { exchange ->
         val mode = exchange.requestURI.rawQuery
+        if (mode == "cursor=burst") {
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, 0)
+            try {
+                exchange.responseBody.use { out ->
+                    repeat(100) { out.write("data: {\"kind\":\"$it\"}\n\n".toByteArray()) }
+                }
+            } catch (_: java.io.IOException) {
+                // take(1) deliberately closes the response before the server finishes.
+            } finally { exchange.close() }
+            return@createContext
+        }
         if (mode == "cursor=framing") {
             exchange.responseHeaders.add("Content-Type", "text/event-stream")
             exchange.sendResponseHeaders(200, 0)
@@ -93,8 +123,87 @@ fun main() = runBlocking {
         exchange.close()
     }
     server.start()
+    val cancelledCalls = AtomicInteger()
+    val http = OkHttpClient.Builder().eventListener(object : EventListener() {
+        override fun canceled(call: Call) { cancelledCalls.incrementAndGet() }
+    }).build()
     try {
-        val client = ApiClient("http://127.0.0.1:${server.address.port}")
+        val client = ApiClient("http://127.0.0.1:${server.address.port}", httpClient = http)
+        val bodyFailure = java.io.IOException("body read failure")
+        val bodyClosed = java.util.concurrent.atomic.AtomicBoolean()
+        val readStarted = CompletableDeferred<Unit>()
+        val callCancelled = CompletableDeferred<Boolean>()
+        val cancelledBodyClosed = CompletableDeferred<Unit>()
+        val releaseRead = java.util.concurrent.CountDownLatch(1)
+        val failingHTTP = OkHttpClient.Builder().eventListener(object : EventListener() {
+            override fun canceled(call: Call) {
+                if (call.request().url.pathSegments.first() == "cancel") {
+                    callCancelled.complete(call.isCanceled())
+                    // Model a transport read that unblocks only when its Call is cancelled.
+                    releaseRead.countDown()
+                }
+            }
+        }).addInterceptor { chain ->
+            val mode = chain.request().url.pathSegments.first()
+            val body = if (mode == "read-failure" || mode == "cancel") {
+                val source = object : Source {
+                    override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                        if (mode == "cancel") { readStarted.complete(Unit); releaseRead.await() }
+                        throw bodyFailure
+                    }
+                    override fun timeout() = Timeout.NONE
+                    override fun close() {
+                        bodyClosed.set(true)
+                        if (mode == "cancel") cancelledBodyClosed.complete(Unit)
+                    }
+                }.buffer()
+                object : ResponseBody() {
+                    override fun contentType() = null
+                    override fun contentLength() = -1L
+                    override fun source(): BufferedSource = source
+                }
+            } else {
+                val content = when (mode) {
+                    "error" -> "{\"message\":\"server failure\"}"
+                    "error-malformed" -> "not JSON"
+                    else -> "{\"kind\":\"json\"}"
+                }
+                content.toResponseBody("application/json".toMediaType())
+            }
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(if (mode.startsWith("error")) 500 else 200).message("fixture").body(body).build()
+        }.build()
+        try {
+            try {
+                withTimeout(3000) { ApiClient("https://example.test/read-failure", httpClient = failingHTTP).getEvent() }
+                error("Body-read failure did not reach caller")
+            } catch (e: java.io.IOException) { check(e === bodyFailure && bodyClosed.get()) }
+            check(ApiClient("https://example.test/valid", httpClient = failingHTTP).getEvent().kind == "json")
+            for (mode in listOf("error", "error-malformed")) {
+                try {
+                    ApiClient("https://example.test/$mode", httpClient = failingHTTP).getEvent()
+                    error("HTTP failure did not reach caller")
+                } catch (e: ApiException) {
+                    check(e.statusCode == 500 && e.message == if (mode == "error") "server failure" else "not JSON")
+                }
+            }
+            val request = launch { ApiClient("https://example.test/cancel", httpClient = failingHTTP).getEvent() }
+            withTimeout(3000) { readStarted.await(); request.cancelAndJoin() }
+            withTimeout(3000) { check(callCancelled.await()); cancelledBodyClosed.await() }
+        } finally {
+            releaseRead.countDown()
+            failingHTTP.dispatcher.executorService.shutdown()
+            failingHTTP.connectionPool.evictAll()
+        }
+        val burst = withTimeout(3000) { client.plainEvents("burst").buffer(0).onEach { yield() }.toList() }
+        check(burst.map { it.kind } == (0 until 100).map { it.toString() }) { "Backpressure lost events" }
+        val cancellations = cancelledCalls.get()
+        val firstOnly = withTimeout(3000) { client.plainEvents("burst").take(1).toList() }
+        check(firstOnly.single().kind == "0" && cancelledCalls.get() > cancellations)
+        try {
+            withTimeout(3000) { client.plainEvents("malformed").toList() }
+            error("Plain stream swallowed decode failure")
+        } catch (_: kotlinx.serialization.SerializationException) { }
         var ready = 0
         val framed = withTimeout(3000) { client.events("framing", onReady = { ready++ }).toList() }
         check(framed.map { it.kind } == listOf("bom", "雪", "last") && ready == 1) { "Frame boundaries lost dispatch: $framed" }
@@ -114,7 +223,7 @@ fun main() = runBlocking {
             val expected = if (mode == "large") "x".repeat(9 * 1024 * 1024) else "<".repeat(2 * 1024 * 1024)
             check(events.single().text == expected) { "Large decoded event was truncated" }
         }
-        val limited = ApiClient("http://127.0.0.1:${server.address.port}", maxSSEEventBytes = 4096)
+        val limited = ApiClient("http://127.0.0.1:${server.address.port}", httpClient = http, maxSSEEventBytes = 4096)
         for (reconnect in listOf(false, true)) {
             try {
                 withTimeout(3000) {
@@ -165,5 +274,9 @@ fun main() = runBlocking {
         } catch (_: TimeoutCancellationException) { }
         check((System.nanoTime() - started) / 1_000_000 < 2000) { "Cancellation blocked" }
         println("PASS: generated Kotlin checkpoint -> controls -> multiline live events, reconnect ID header and empty reset")
-    } finally { server.stop(0) }
+    } finally {
+        server.stop(0)
+        http.dispatcher.executorService.shutdown()
+        http.connectionPool.evictAll()
+    }
 }

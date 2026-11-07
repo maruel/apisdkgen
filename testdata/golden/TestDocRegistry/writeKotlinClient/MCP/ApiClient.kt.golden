@@ -4,6 +4,7 @@ package com.example.mcp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -66,27 +67,26 @@ class ApiClient(
                     cont.resumeWithException(e)
                 }
                 override fun onResponse(call: okhttp3.Call, response: Response) {
-                    response.use { resp ->
-                        val responseBody = resp.body?.string() ?: ""
-                        if (!resp.isSuccessful) {
-                            try {
-                                val err = json.decodeFromString<JSONRPCResponse>(responseBody)
-                                cont.resumeWithException(
+                    // Finish body processing and response cleanup before settling the continuation.
+                    val result = try {
+                        response.use { resp ->
+                            val responseBody = resp.body?.string() ?: ""
+                            if (!resp.isSuccessful) {
+                                val failure = try {
+                                    val err = json.decodeFromString<JSONRPCResponse>(responseBody)
                                     ApiException(resp.code, err.error?.code?.toString() ?: "UNKNOWN", err.error?.message ?: "", null)
-                                )
-                            } catch (_: Exception) {
-                                cont.resumeWithException(
+                                } catch (_: Exception) {
                                     ApiException(resp.code, "UNKNOWN", responseBody)
-                                )
+                                }
+                                throw failure
                             }
-                            return
+                            json.decodeFromString<T>(responseBody)
                         }
-                        try {
-                            cont.resume(json.decodeFromString<T>(responseBody))
-                        } catch (e: Exception) {
-                            cont.resumeWithException(e)
-                        }
+                    } catch (e: Exception) {
+                        cont.resumeWithException(e)
+                        return
                     }
+                    cont.resume(result)
                 }
             })
         }
@@ -169,7 +169,8 @@ class ApiClient(
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 try {
                     val event = json.decodeFromString<T>(data)
-                    if (trySend(event).isFailure) eventSource.cancel()
+                    // OkHttp invokes this on an IO callback thread; suspend reads until delivery.
+                    trySendBlocking(event).getOrThrow()
                 } catch (e: Exception) {
                     close(e)
                 }

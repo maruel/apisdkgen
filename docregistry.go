@@ -155,6 +155,7 @@ func (d *docRegistry[C]) writeKotlinClient(outDir string, out outputSink) error 
 	b.WriteString(`import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -221,27 +222,28 @@ class ApiClient(
                     cont.resumeWithException(e)
                 }
                 override fun onResponse(call: okhttp3.Call, response: Response) {
-                    response.use { resp ->
-                        val responseBody = resp.body?.string() ?: ""
-                        if (!resp.isSuccessful) {
-                            try {
+                    // Finish body processing and response cleanup before settling the continuation.
+                    val result = try {
+                        response.use { resp ->
+                            val responseBody = resp.body?.string() ?: ""
+                            if (!resp.isSuccessful) {
+                                val failure = try {
 `)
-	fmt.Fprintf(&b, "                                val err = json.decodeFromString<%s>(responseBody)\n", errorModel.TypeName)
-	fmt.Fprintf(&b, "                                cont.resumeWithException(\n                                    ApiException(resp.code, %s, %s, %s)\n                                )\n", errorModel.KTCodeExpr, errorModel.KTMessageExpr, errorModel.KTDetailsExpr)
-	b.WriteString(`                            } catch (_: Exception) {
-                                cont.resumeWithException(
+	fmt.Fprintf(&b, "                                    val err = json.decodeFromString<%s>(responseBody)\n", errorModel.TypeName)
+	fmt.Fprintf(&b, "                                    ApiException(resp.code, %s, %s, %s)\n", errorModel.KTCodeExpr, errorModel.KTMessageExpr, errorModel.KTDetailsExpr)
+	b.WriteString(`                                } catch (_: Exception) {
 `)
 	fmt.Fprintf(&b, "                                    ApiException(resp.code, %s, responseBody)\n", d.kotlinUnknownErrorCode("UNKNOWN"))
-	b.WriteString(`                                )
+	b.WriteString(`                                }
+                                throw failure
                             }
-                            return
+                            json.decodeFromString<T>(responseBody)
                         }
-                        try {
-                            cont.resume(json.decodeFromString<T>(responseBody))
-                        } catch (e: Exception) {
-                            cont.resumeWithException(e)
-                        }
+                    } catch (e: Exception) {
+                        cont.resumeWithException(e)
+                        return
                     }
+                    cont.resume(result)
                 }
             })
         }
@@ -350,7 +352,8 @@ class ApiClient(
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 try {
                     val event = json.decodeFromString<T>(data)
-                    if (trySend(event).isFailure) eventSource.cancel()
+                    // OkHttp invokes this on an IO callback thread; suspend reads until delivery.
+                    trySendBlocking(event).getOrThrow()
                 } catch (e: Exception) {
                     close(e)
                 }
@@ -536,20 +539,35 @@ private struct SSETransportFailure: Error { let underlying: Error }
 
 // Cancellation can race with URLSession returning its data task.
 private final class SSETaskOwner {
+    private enum State {
+        case waiting
+        case installed(URLSessionDataTask)
+        case cancelled
+    }
     private let lock = NSLock()
-    private var task: URLSessionDataTask?
-    private var cancelled = false
+    private var state = State.waiting
     func install(_ task: URLSessionDataTask) {
         lock.lock()
-        defer { lock.unlock() }
-        if cancelled { task.cancel() } else { self.task = task }
+        switch state {
+        case .waiting:
+            state = .installed(task)
+            lock.unlock()
+        case .cancelled:
+            lock.unlock()
+            task.cancel()
+        case .installed:
+            lock.unlock()
+            preconditionFailure("SSE response task already installed")
+        }
     }
     func cancel() {
         lock.lock()
-        defer { lock.unlock() }
-        cancelled = true
+        let task: URLSessionDataTask?
+        if case .installed(let installed) = state { task = installed } else { task = nil }
+        state = .cancelled
+        lock.unlock()
+        // Cancellation may invoke callbacks; never perform it while holding the lock.
         task?.cancel()
-        task = nil
     }
     deinit { cancel() }
 }
@@ -619,13 +637,17 @@ private struct SSEFrameParser {
 // Pull one message at a time: no producer task or decoded-event queue.
 // Memory is proportional to one materialized event; only an explicit size limit rejects large events.
 private final class SSEFrameReader<T> {
+    private enum State {
+        case unopened
+        case reading(URLSession.AsyncBytes.Iterator)
+        case finished
+    }
     private let open: () async throws -> URLSession.AsyncBytes
     private let decode: (String, Data) throws -> T?
     private let onEventID: ((String) -> Void)?
     private var parser: SSEFrameParser
     private let owner = SSETaskOwner()
-    private var iterator: URLSession.AsyncBytes.Iterator?
-    private var finished = false
+    private var state = State.unopened
     init(open: @escaping () async throws -> URLSession.AsyncBytes,
          onEventID: ((String) -> Void)?, maxSSEEventBytes: Int?, decode: @escaping (String, Data) throws -> T?) {
         self.open = open
@@ -638,35 +660,43 @@ private final class SSEFrameReader<T> {
         let owner = self.owner
         return try await withTaskCancellationHandler {
             do { return try await self.readNext() }
-            catch { owner.cancel(); self.iterator = nil; self.finished = true; throw error }
+            catch { self.state = .finished; owner.cancel(); throw error }
         } onCancel: { owner.cancel() }
     }
     private func readNext() async throws -> T? {
         try _Concurrency.Task.checkCancellation()
-        if finished { return nil }
-        if iterator == nil {
+        var iterator: URLSession.AsyncBytes.Iterator
+        switch state {
+        case .unopened:
             let bytes = try await open()
             owner.install(bytes.task)
             iterator = bytes.makeAsyncIterator()
+            state = .reading(iterator)
+        case .reading(let current):
+            iterator = current
+        case .finished:
+            return nil
         }
         while true {
             try _Concurrency.Task.checkCancellation()
             let nextByte: UInt8?
-            do { nextByte = try await iterator?.next() }
+            do { nextByte = try await iterator.next() }
             catch {
                 try _Concurrency.Task.checkCancellation()
                 throw SSETransportFailure(underlying: error)
             }
             guard let byte = nextByte else {
-                finished = true
-                iterator = nil
+                state = .finished
                 owner.cancel()
                 return nil
             }
             guard let frame = try parser.accept(byte) else { continue }
             // Cursor observation precedes dispatch; unknown types are ignored by decode.
             if let id = frame.id { onEventID?(id) }
-            if let data = frame.data, let event = try decode(frame.type, data) { return event }
+            if let data = frame.data, let event = try decode(frame.type, data) {
+                state = .reading(iterator)
+                return event
+            }
         }
     }
 }
