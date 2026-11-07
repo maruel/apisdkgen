@@ -3,6 +3,7 @@
 package apisdkgen
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/maruel/apisdkgen/apispec"
 )
 
 var pathParamRe = regexp.MustCompile(`\{(\w+)\}`)
@@ -33,8 +36,9 @@ var swiftReservedWords = map[string]struct{}{
 }
 
 // loadDocsInDir parses Go source files in dir and extracts documentation
-// comments, source file tracking, and alias type definitions.
-func loadDocsInDir[C ~string](dir string) (*docRegistry[C], error) {
+// comments, source file tracking, and alias type definitions, then attaches the
+// immutable configuration and merges its configured error-code alias.
+func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[C], error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -52,6 +56,7 @@ func loadDocsInDir[C ~string](dir string) (*docRegistry[C], error) {
 		files = append(files, f)
 	}
 	reg := &docRegistry[C]{
+		cfg:      cfg,
 		typeDoc:  map[string]string{},
 		typeFile: map[string]string{},
 		fieldDoc: map[string]map[string]string{},
@@ -70,7 +75,7 @@ func loadDocsInDir[C ~string](dir string) (*docRegistry[C], error) {
 				if !ok {
 					continue
 				}
-				switch t := typeSpec.Type.(type) {
+				switch t := ast.Unparen(typeSpec.Type).(type) {
 				case *ast.StructType:
 					var doc string
 					if typeSpec.Doc != nil {
@@ -133,50 +138,49 @@ func loadDocsInDir[C ~string](dir string) (*docRegistry[C], error) {
 		}
 	}
 
-	// Pass 2: collect constants for string alias types.
-	aliasConsts := map[string][]aliasConstant{}
+	// Resolve only constants belonging to discovered string aliases. Other
+	// declarations remain available as references without requiring a complete
+	// type-checkable consumer package.
+	resolver := stringConstResolver{aliases: stringAliases, declarations: map[string]stringConstDecl{}, values: map[string]stringConstValue{}, active: map[string]struct{}{}}
+	var names []string
 	for _, file := range files {
 		for _, decl := range file.Decls {
-			genDecl, ok := decl.(*ast.GenDecl)
-			if !ok || genDecl.Tok != token.CONST {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			var lastType string
-			for _, spec := range genDecl.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
+			var prior *ast.ValueSpec
+			for _, spec := range gen.Specs {
+				vs := spec.(*ast.ValueSpec)
+				value := vs
+				if len(vs.Values) == 0 {
+					value = prior
+				} else {
+					prior = vs
 				}
-				typeName := lastType
-				if vs.Type != nil {
-					if ident, ok := vs.Type.(*ast.Ident); ok {
-						typeName = ident.Name
-						lastType = typeName
-					}
+				if value == nil || len(value.Values) != len(vs.Names) {
+					return nil, fmt.Errorf("invalid constant declaration at %s", fset.Position(vs.Pos()))
 				}
-				if _, isAlias := stringAliases[typeName]; !isAlias {
-					continue
-				}
-				for _, name := range vs.Names {
-					if len(vs.Values) == 0 {
+				for i, name := range vs.Names {
+					if name.Name == "_" {
 						continue
 					}
-					lit, ok := vs.Values[0].(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					val, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						continue
-					}
-					aliasConsts[typeName] = append(aliasConsts[typeName], aliasConstant{
-						name:  name.Name,
-						value: val,
-						doc:   valueSpecDoc(vs),
-					})
+					resolver.declarations[name.Name] = stringConstDecl{expr: value.Values[i], typ: value.Type, doc: valueSpecDoc(vs)}
+					names = append(names, name.Name)
 				}
 			}
 		}
+	}
+	aliasConsts := map[string][]aliasConstant{}
+	for _, name := range names {
+		if resolver.constantType(name, map[string]struct{}{}) == "" {
+			continue
+		}
+		v, err := resolver.resolve(name)
+		if err != nil {
+			return nil, fmt.Errorf("string constant %s: %w", name, err)
+		}
+		aliasConsts[v.typeName] = append(aliasConsts[v.typeName], aliasConstant{name: name, value: v.value, doc: resolver.declarations[name].doc})
 	}
 
 	// Build aliases in sorted order for deterministic output.
@@ -195,7 +199,197 @@ func loadDocsInDir[C ~string](dir string) (*docRegistry[C], error) {
 		reg.aliasNames[a.name] = struct{}{}
 	}
 
+	if err := reg.addConfiguredErrorCodeAlias(); err != nil {
+		return nil, fmt.Errorf("configuring error-code type: %w", err)
+	}
 	return reg, nil
+}
+
+// String enum extraction supports literals, local references, parentheses,
+// concatenation, string min/max, string/named-string conversions, and inherited const specs.
+// Imported expressions and numeric conversions require a consumer-provided
+// literal declaration instead of silently producing incomplete enum metadata.
+type stringConstDecl struct {
+	expr ast.Expr
+	typ  ast.Expr
+	doc  string
+}
+
+type stringConstValue struct {
+	value    string
+	typeName string
+}
+
+// mergeType preserves the named type carried by supported string operands.
+func (v *stringConstValue) mergeType(other stringConstValue) error {
+	if v.typeName != "" && other.typeName != "" && v.typeName != other.typeName {
+		return fmt.Errorf("incompatible string types %s and %s", v.typeName, other.typeName)
+	}
+	if v.typeName == "" {
+		v.typeName = other.typeName
+	}
+	return nil
+}
+
+type stringConstResolver struct {
+	aliases      map[string]string
+	declarations map[string]stringConstDecl
+	values       map[string]stringConstValue
+	active       map[string]struct{}
+}
+
+func (r *stringConstResolver) constantType(name string, visiting map[string]struct{}) string {
+	if _, ok := visiting[name]; ok {
+		return ""
+	}
+	visiting[name] = struct{}{}
+	defer delete(visiting, name)
+	d, ok := r.declarations[name]
+	if !ok {
+		return ""
+	}
+	if d.typ != nil {
+		if ident, ok := ast.Unparen(d.typ).(*ast.Ident); ok {
+			if _, ok := r.aliases[ident.Name]; ok {
+				return ident.Name
+			}
+		}
+		return ""
+	}
+	return r.expressionType(d.expr, visiting)
+}
+
+// expressionType recognizes the operators and calls that can retain a named
+// string result. Comparisons and other constant builtins have nonstring results.
+func (r *stringConstResolver) expressionType(expr ast.Expr, visiting map[string]struct{}) string {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		return r.constantType(e.Name, visiting)
+	case *ast.BinaryExpr:
+		// Concatenation retains a named string type; comparisons yield bool.
+		if e.Op == token.ADD {
+			if name := r.expressionType(e.X, visiting); name != "" {
+				return name
+			}
+			return r.expressionType(e.Y, visiting)
+		}
+	case *ast.CallExpr:
+		if ident, ok := ast.Unparen(e.Fun).(*ast.Ident); ok {
+			if _, ok := r.aliases[ident.Name]; ok {
+				return ident.Name
+			}
+			// min/max retain a named argument type, even when it is not first.
+			// Other constant builtins return unnamed strings, bools, or numbers.
+			if ident.Name == "min" || ident.Name == "max" {
+				for _, arg := range e.Args {
+					if name := r.expressionType(arg, visiting); name != "" {
+						return name
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (r *stringConstResolver) resolve(name string) (stringConstValue, error) {
+	if v, ok := r.values[name]; ok {
+		return v, nil
+	}
+	if _, ok := r.active[name]; ok {
+		return stringConstValue{}, fmt.Errorf("cyclic reference to %s", name)
+	}
+	d, ok := r.declarations[name]
+	if !ok {
+		return stringConstValue{}, fmt.Errorf("unknown reference %s", name)
+	}
+	r.active[name] = struct{}{}
+	defer delete(r.active, name)
+	v, err := r.expression(d.expr)
+	if err != nil {
+		return stringConstValue{}, err
+	}
+	if d.typ != nil {
+		ident, ok := ast.Unparen(d.typ).(*ast.Ident)
+		if !ok {
+			return stringConstValue{}, fmt.Errorf("unsupported type expression %T", d.typ)
+		}
+		if _, ok := r.aliases[ident.Name]; !ok && ident.Name != "string" {
+			return stringConstValue{}, fmt.Errorf("unsupported type %s", ident.Name)
+		}
+		if v.typeName != "" && v.typeName != ident.Name {
+			return stringConstValue{}, fmt.Errorf("incompatible string types %s and %s", ident.Name, v.typeName)
+		}
+		v.typeName = ident.Name
+		if v.typeName == "string" {
+			v.typeName = ""
+		}
+	}
+	r.values[name] = v
+	return v, nil
+}
+
+func (r *stringConstResolver) expression(expr ast.Expr) (stringConstValue, error) {
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.BasicLit:
+		if e.Kind == token.STRING {
+			v, err := strconv.Unquote(e.Value)
+			return stringConstValue{value: v}, err
+		}
+	case *ast.Ident:
+		return r.resolve(e.Name)
+	case *ast.BinaryExpr:
+		if e.Op == token.ADD {
+			a, err := r.expression(e.X)
+			if err != nil {
+				return stringConstValue{}, err
+			}
+			b, err := r.expression(e.Y)
+			if err != nil {
+				return stringConstValue{}, err
+			}
+			if err := a.mergeType(b); err != nil {
+				return stringConstValue{}, err
+			}
+			a.value += b.value
+			return a, nil
+		}
+	case *ast.CallExpr:
+		if ident, ok := ast.Unparen(e.Fun).(*ast.Ident); ok {
+			_, alias := r.aliases[ident.Name]
+			if (alias || ident.Name == "string") && len(e.Args) == 1 {
+				v, err := r.expression(e.Args[0])
+				if alias {
+					v.typeName = ident.Name
+				} else {
+					v.typeName = ""
+				}
+				return v, err
+			}
+			if !alias && (ident.Name == "min" || ident.Name == "max") && len(e.Args) > 0 {
+				best, err := r.expression(e.Args[0])
+				if err != nil {
+					return stringConstValue{}, err
+				}
+				for _, arg := range e.Args[1:] {
+					next, err := r.expression(arg)
+					if err != nil {
+						return stringConstValue{}, err
+					}
+					if err := best.mergeType(next); err != nil {
+						return stringConstValue{}, err
+					}
+					if ident.Name == "min" {
+						best.value = min(best.value, next.value)
+					} else {
+						best.value = max(best.value, next.value)
+					}
+				}
+				return best, nil
+			}
+		}
+	}
+	return stringConstValue{}, fmt.Errorf("unsupported expression %T", expr)
 }
 
 func valueSpecDoc(vs *ast.ValueSpec) string {

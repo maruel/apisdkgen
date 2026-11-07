@@ -47,6 +47,27 @@ func TestGenerateErrors(t *testing.T) {
 			t.Fatalf("invalid input changed output directory: %v", entries)
 		}
 	})
+	t.Run("constant preparation preserves output", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		source := filepath.Join(root, "types.go")
+		if err := os.WriteFile(source, []byte("package fixture\ntype State string\nconst StateFirst State = external.Value\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output := filepath.Join(root, "types.gen.ts")
+		const previous = "previous SDK\n"
+		if err := os.WriteFile(output, []byte(previous), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		api := NewAPI(root, OutputConfig{TypeScriptDir: root}, apispec.Config[string]{})
+		if err := api.Generate(); err == nil || err.Error() != "loading docs: string constant StateFirst: unsupported expression *ast.SelectorExpr" {
+			t.Fatalf("Generate() = %v", err)
+		}
+		data, err := fs.ReadFile(os.DirFS(root), "types.gen.ts")
+		if err != nil || string(data) != previous {
+			t.Fatalf("existing output = %q, %v", data, err)
+		}
+	})
 	t.Run("invalid specification", func(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
@@ -118,6 +139,10 @@ func TestGenerateErrors(t *testing.T) {
 				c.Routes[0].Req = reflect.TypeFor[testSDKEvent]()
 				c.Routes[0].QueryParams = []string{"cursor"}
 			}, `routes[0] ("getEvent"): missing query field "cursor"`},
+			{"native query request", func(c *apispec.Config[string]) {
+				c.Routes[0].QueryFromReq = true
+				c.Routes[0].Req = reflect.TypeFor[testSDKEvent]()
+			}, `routes[0] ("getEvent"): QueryFromReq is supported only by TypeScript output`},
 			{"non GET SSE", func(c *apispec.Config[string]) { c.Routes[0].IsSSE = true; c.Routes[0].Method = "POST" }, `routes[0] ("getEvent"): SSE method must be GET`},
 			{"events without SSE", func(c *apispec.Config[string]) {
 				c.Routes[0].SSEEvents = []apispec.SSEEvent{{Name: "ready", Handler: "onReady"}}

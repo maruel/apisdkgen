@@ -50,14 +50,8 @@ func (d *docRegistry[C]) addConfiguredErrorCodeAlias() error {
 			return nil
 		}
 	}
-	if d.aliasNames == nil {
-		d.aliasNames = map[string]struct{}{}
-	}
 	d.aliases = append(d.aliases, aliasInfo{name: t.Name(), constants: constants})
 	d.aliasNames[t.Name()] = struct{}{}
-	if d.typeDoc == nil {
-		d.typeDoc = map[string]string{}
-	}
 	if d.typeDoc[t.Name()] == "" {
 		d.typeDoc[t.Name()] = "ErrorCode is a machine-readable API error identifier."
 	}

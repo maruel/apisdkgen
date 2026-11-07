@@ -111,17 +111,19 @@ type ClientScope struct {
 
 // Route describes a single API endpoint for generated clients and docs.
 type Route struct {
-	Name         string
-	Doc          string
-	Method       string
-	Path         string
-	Category     string
-	Req          reflect.Type
-	Resp         reflect.Type
-	IsArray      bool
-	IsSSE        bool
-	SSEEvents    []SSEEvent
-	QueryParams  []string
+	Name        string
+	Doc         string
+	Method      string
+	Path        string
+	Category    string
+	Req         reflect.Type
+	Resp        reflect.Type
+	IsArray     bool
+	IsSSE       bool
+	SSEEvents   []SSEEvent
+	QueryParams []string
+	// QueryFromReq maps TypeScript JSON request fields to query parameters.
+	// Native outputs do not support this mode.
 	QueryFromReq bool
 	HeadersArg   bool
 }
@@ -143,6 +145,18 @@ func (r *Route) Validate() error {
 	}
 	if r.IsSSE && r.Method != "" && r.Method != http.MethodGet {
 		return errors.New("SSE method must be GET")
+	}
+	if r.IsSSE {
+		switch {
+		case r.QueryFromReq:
+			return errors.New("SSE routes do not support request-derived queries")
+		case r.Req != nil:
+			return errors.New("SSE routes do not support request types")
+		case r.IsArray:
+			return errors.New("SSE routes do not support array responses")
+		case r.HeadersArg:
+			return errors.New("SSE routes do not support custom header arguments")
+		}
 	}
 	if err := validatePath(r.Path); err != nil {
 		return err

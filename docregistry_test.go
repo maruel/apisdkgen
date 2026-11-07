@@ -155,6 +155,83 @@ func TestGoTypeToDoc(t *testing.T) {
 func TestLoadDocsInDir(t *testing.T) {
 	t.Parallel()
 
+	t.Run("string constants", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name   string
+			source string
+			want   []aliasConstant
+		}{
+			{"string min and max", `const (StateFirst = min(State("first"), State("last")); StateLast = max(StateFirst, State("last")))`, []aliasConstant{{name: "StateFirst", value: "first"}, {name: "StateLast", value: "last"}}},
+			{"mixed and nested builtins", `const (prefix = min("middle", "first"); StateFirst = min("last", (State)(prefix)); StateLast = max("last", min(StateFirst, State("middle"))))`, []aliasConstant{{name: "StateFirst", value: "first"}, {name: "StateLast", value: "last"}}},
+			{"variadic builtin type retention", `const StateFirst = min("z", State("m"), "a")`, []aliasConstant{{name: "StateFirst", value: "a"}}},
+			{"single builtin argument", `const StateFirst = max(State("first"))`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+			{"unrelated builtin results", `const (StateFirst State = "first"; IsFirst = min(StateFirst, State("last")) == "first"; Length = len(StateFirst); Small = min(1, 2); Sum = real(complex(1, 2)) + imag(complex(3, 4)))`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+			{"parenthesized type", `const StateFirst (State) = "first"`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+			{"parenthesized conversion", `const StateFirst = (State)("first")`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+			{"unrelated boolean comparison", `const (StateFirst State = "first"; IsFirst = StateFirst == "first"; IsLater = StateFirst > "a")`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+			{"typed and inherited", `const (StateFirst State = "first"; StateAgain; Other = "untyped"; OtherAgain)`, []aliasConstant{{name: "StateFirst", value: "first"}, {name: "StateAgain", value: "first"}}},
+			{"multiple values", `const (StateFirst, StateSecond State = "first", "second"; StateThird, StateFourth)`, []aliasConstant{{name: "StateFirst", value: "first"}, {name: "StateSecond", value: "second"}, {name: "StateThird", value: "first"}, {name: "StateFourth", value: "second"}}},
+			{"inferred references and expressions", `const (StateFirst = State("first"); StateAgain = StateFirst; StateLast = StatePrefix + State("last"); StatePrefix = State("prefix-"))`, []aliasConstant{{name: "StateFirst", value: "first"}, {name: "StateAgain", value: "first"}, {name: "StateLast", value: "prefix-last"}, {name: "StatePrefix", value: "prefix-"}}},
+			{"string helper and parenthesized conversion", `const (prefix string = "prefix-"; StateFirst = (State(prefix + "first")); Other = string(StateFirst))`, []aliasConstant{{name: "StateFirst", value: "prefix-first"}}},
+			{"block reset and unrelated numeric constants", `const StateFirst State = "first"; const Other = 42; const OtherText = "untyped"`, []aliasConstant{{name: "StateFirst", value: "first"}}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State string\n"+tc.source+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(tc.want, docs.aliases[0].constants, cmp.AllowUnexported(aliasConstant{})); diff != "" {
+					t.Fatalf("constants (-want +got):\n%s", diff)
+				}
+			})
+		}
+	})
+	t.Run("parenthesized alias declaration", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State (string)\nconst StateFirst State = \"first\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(docs.aliases) != 1 {
+			t.Fatalf("aliases = %v; want State", docs.aliases)
+		}
+		if diff := cmp.Diff([]aliasConstant{{name: "StateFirst", value: "first"}}, docs.aliases[0].constants, cmp.AllowUnexported(aliasConstant{})); diff != "" {
+			t.Fatalf("constants (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("unsupported string constant", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct{ name, declaration, want string }{
+			{"plain", `const StateFirst State = external.Value`, "string constant StateFirst: unsupported expression *ast.SelectorExpr"},
+			{"inferred builtin imported argument", `const StateFirst = min(State("first"), external.Value)`, "string constant StateFirst: unsupported expression *ast.SelectorExpr"},
+			{"inferred builtin numeric conversion", `const StateFirst = max(State("first"), State(65))`, "string constant StateFirst: unsupported expression *ast.BasicLit"},
+			{"parenthesized type", `const StateFirst (State) = external.Value`, "string constant StateFirst: unsupported expression *ast.SelectorExpr"},
+			{"parenthesized conversion", `const StateFirst = (State)(external.Value)`, "string constant StateFirst: unsupported expression *ast.SelectorExpr"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State string\n"+tc.declaration+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				_, err := loadDocsInDir(dir, &apispec.Config[string]{})
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("loadDocsInDir() = %v", err)
+				}
+			})
+		}
+	})
+
 	t.Run("string alias docs", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -171,7 +248,7 @@ const (
 		if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte(source), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		docs, err := loadDocsInDir[string](dir)
+		docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -768,6 +845,46 @@ func TestGenerate(t *testing.T) {
 		})
 	})
 
+	t.Run("TypeScript query headers", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		cfg := apispec.Config[string]{
+			SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
+			ExtraSeeds:      []reflect.Type{reflect.TypeFor[testGeneratedErrorResponse]()},
+			ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse", TSDetailsExpr: "undefined"},
+			Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Req: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent](), QueryFromReq: true, QueryParams: []string{"limit"}, HeadersArg: true}},
+		}
+		api := NewAPI(".", OutputConfig{TypeScriptDir: dir}, cfg)
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		consumer := `import { createApiClient } from "./api.gen";
+async function main() {
+  let calls = 0;
+  const client = createApiClient(async (url, init) => {
+    const headers = new Headers(init?.headers);
+    if (url !== "/items?limit=3" || init?.method !== "GET" || init?.body !== undefined || headers.get("X-Test") !== "expected") throw new Error("query request contract failed");
+    calls++;
+    return new Response(JSON.stringify({kind: "listed"}));
+  });
+  const response = await client.list({limit: 3}, {"X-Test": "expected"});
+  if (response.kind !== "listed" || calls !== 1) throw new Error("query response contract failed");
+}
+void main();
+`
+		if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(consumer), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, cmd := range []*exec.Cmd{
+			exec.CommandContext(t.Context(), "tsc", "--strict", "--noUnusedLocals", "--noUnusedParameters", "--target", "ES2022", "--module", "commonjs", "consumer.ts"),
+			exec.CommandContext(t.Context(), "node", "consumer.js"),
+		} {
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s failed: %v\n%s", cmd.Path, err, out)
+			}
+		}
+	})
 	t.Run("empty TypeScript client", func(t *testing.T) {
 		t.Parallel()
 		_, err := exec.LookPath("tsc")

@@ -67,6 +67,9 @@ func (o *OutputConfig) validate[C ~string](cfg *apispec.Config[C]) error {
 				return fmt.Errorf("routes[%d] (%q): %w", i, route.Name, err)
 			}
 		}
+		if route.QueryFromReq && (o.KotlinDir != "" || o.SwiftDir != "") {
+			return fmt.Errorf("routes[%d] (%q): QueryFromReq is supported only by TypeScript output", i, route.Name)
+		}
 		// Scoped TypeScript factories have independent method namespaces.
 		namespace := ""
 		if scope := routeClientScope(cfg.ClientScopes, route.Path); scope != nil {
@@ -151,6 +154,8 @@ type API struct {
 }
 
 // NewAPI constructs an SDK generation target from a typed API specification.
+// The caller must not mutate maps, slices, or referenced values in config after
+// construction; Generate and Verify read that immutable specification each time.
 func NewAPI[C ~string](sourceDir string, output OutputConfig, config apispec.Config[C]) API {
 	return API{output: output, generate: func(out OutputConfig, sink outputSink) error {
 		return generateAPI(sourceDir, out, config, sink)
@@ -267,13 +272,9 @@ func generateAPI[C ~string](sourceDir string, output OutputConfig, config apispe
 	if err := output.validate(&config); err != nil {
 		return fmt.Errorf("invalid API specification: %w", err)
 	}
-	docs, err := loadDocsInDir[C](sourceDir)
+	docs, err := loadDocsInDir(sourceDir, &config)
 	if err != nil {
 		return fmt.Errorf("loading docs: %w", err)
-	}
-	docs.cfg = &config
-	if err := docs.addConfiguredErrorCodeAlias(); err != nil {
-		return fmt.Errorf("configuring error-code type: %w", err)
 	}
 
 	if output.TypeScriptDir != "" {

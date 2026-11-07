@@ -79,7 +79,11 @@ func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *s
 			field := fields[i]
 			fmt.Fprintf(b, "      if (req.%s !== undefined && req.%s !== null) query.set(%q, String(req.%s));\n", field, field, q, field)
 		}
-		fmt.Fprintf(b, "      return request<%s>(%q, %s + (query.size ? `?${query}` : \"\"));\n", respType, r.Method, tsPath)
+		headerArg := ""
+		if r.HeadersArg {
+			headerArg = ", undefined, headers"
+		}
+		fmt.Fprintf(b, "      return request<%s>(%q, %s + (query.size ? `?${query}` : \"\")%s);\n", respType, r.Method, tsPath, headerArg)
 		b.WriteString("    },\n")
 		return nil
 	}
