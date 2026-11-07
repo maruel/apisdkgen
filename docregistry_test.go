@@ -944,6 +944,7 @@ console.log(client, new APIError(500, "UNKNOWN"));
 					{Name: "stats", Handler: "onStats", Resp: eventType},
 					{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
 					{Name: "ready", Handler: "onReady"},
+					{Name: "error", Handler: "onControlError"},
 					{Name: "failure", Handler: "onFailure", Resp: reflect.TypeFor[testSSEError]()},
 				}},
 				{Name: "rootEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}},
@@ -963,7 +964,7 @@ globalThis.EventSource = Source as unknown as typeof EventSource;
 function check(ok: boolean): void { if (!ok) throw new Error("SSE contract failed"); }
 const client = createApiClient(async () => { throw new Error("unexpected JSON request"); });
 const value = "a +&=/#?%雪";
-let messages = 0, ready = 0, failures = 0, errors = 0;
+let messages = 0, ready = 0, failures = 0, errors = 0, controlErrors = 0;
 const controls: string[] = [];
 const handlers = {
   onMessage: (event: { kind: string }) => { check(event.kind === "update"); messages++; controls.push("message"); },
@@ -971,6 +972,7 @@ const handlers = {
   onStats: (event: { kind: string }) => { check(event.kind === "stats"); controls.push("stats"); },
   onReset: (event: { bootstrapURL: string }) => { check(event.bootstrapURL === "/bootstrap"); controls.push("reset"); },
   onReady: () => { ready++; },
+  onControlError: () => { controlErrors++; },
   onFailure: (event: { message: string }) => { check(event.message === "expired"); failures++; },
   onError: (_error: unknown) => { errors++; },
 };
@@ -984,11 +986,17 @@ source.dispatchEvent(new MessageEvent("checkpoint", { data: JSON.stringify({curs
 source.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({kind: "update"}) }));
 source.dispatchEvent(new MessageEvent("stats", { data: JSON.stringify({kind: "stats"}) }));
 source.dispatchEvent(new MessageEvent("reset", { data: JSON.stringify({bootstrapURL: "/bootstrap"}) }));
-source.dispatchEvent(new Event("ready"));
+source.dispatchEvent(new MessageEvent("ready", { data: "" }));
 source.dispatchEvent(new MessageEvent("failure", { data: JSON.stringify({message: "expired"}) }));
 source.dispatchEvent(new MessageEvent("message", { data: "not JSON" }));
 check(messages === 1 && ready === 1 && failures === 1 && errors === 1);
 check(controls.join(",") === "checkpoint,message,stats,reset");
+source.dispatchEvent(new Event("error"));
+check(controlErrors === 0 && errors === 1);
+source.dispatchEvent(new MessageEvent("error", { data: "" }));
+check(controlErrors === 1 && errors === 1);
+source.dispatchEvent(new MessageEvent("error", { data: 42 }));
+check(controlErrors === 1);
 const callbackFailure = new Error("callback failure");
 const callbackErrors: unknown[] = [];
 const callbacks = client.workspace(value).events(value, value, "", {
@@ -996,12 +1004,16 @@ const callbacks = client.workspace(value).events(value, value, "", {
   onMessage: () => { throw callbackFailure; },
   onCheckpoint: () => { throw callbackFailure; },
   onReady: () => { throw callbackFailure; },
+  onControlError: () => { throw callbackFailure; },
   onError: (error: unknown) => { callbackErrors.push(error); },
 });
 callbacks.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({kind: "update"}) }));
 callbacks.dispatchEvent(new MessageEvent("checkpoint", { data: JSON.stringify({cursor: "next"}) }));
-callbacks.dispatchEvent(new Event("ready"));
-check(callbackErrors.length === 3 && callbackErrors.every(error => error === callbackFailure));
+callbacks.dispatchEvent(new MessageEvent("ready", { data: "" }));
+callbacks.dispatchEvent(new Event("error"));
+check(callbackErrors.length === 3);
+callbacks.dispatchEvent(new MessageEvent("error", { data: "" }));
+check(callbackErrors.length === 4 && callbackErrors.every(error => error === callbackFailure));
 check(new URL(client.rootEvents(value, handlers).url, "https://example.test").searchParams.get("cursor") === value);
 check(client.rootEvents("", handlers).url === "/events?cursor=");
 check(client.rawEvents(handlers).url === "/raw-events");

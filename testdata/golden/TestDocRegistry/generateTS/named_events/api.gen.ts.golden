@@ -59,14 +59,16 @@ export function createApiClient(fetchFn: FetchFn = (globalThis as any).fetch.bin
           handlers.onError(err);
         }
       });
-      es.addEventListener("ready", () => {
+      es.addEventListener("ready", (e) => {
+        if (!(e instanceof MessageEvent) || typeof e.data !== "string") return;
         try {
           handlers.onReady?.();
         } catch (err) {
           handlers.onError(err);
         }
       });
-      es.addEventListener("reset", () => {
+      es.addEventListener("reset", (e) => {
+        if (!(e instanceof MessageEvent) || typeof e.data !== "string") return;
         try {
           handlers.onReset?.();
         } catch (err) {

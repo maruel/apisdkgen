@@ -150,7 +150,9 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	for i := range r.SSEEvents {
 		e := &r.SSEEvents[i]
 		if e.Resp == nil {
-			fmt.Fprintf(b, "      es.addEventListener(%q, () => {\n", e.Name)
+			// Payloadless SSE messages still carry string data; native error Events belong to EventSource.
+			fmt.Fprintf(b, "      es.addEventListener(%q, (e) => {\n", e.Name)
+			b.WriteString("        if (!(e instanceof MessageEvent) || typeof e.data !== \"string\") return;\n")
 			b.WriteString("        try {\n")
 			fmt.Fprintf(b, "          handlers.%s?.();\n", e.Handler)
 			b.WriteString("        } catch (err) {\n")
