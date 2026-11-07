@@ -15,6 +15,27 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
+type testNonScalarQuery struct {
+	Values []string `query:"values"`
+}
+
+type testDuplicateQuery struct {
+	First  string `query:"same"`
+	Second string `query:"same"`
+}
+
+type testInvalidQueryName struct {
+	Value string `query:"限度"`
+}
+type testDollarQueryName struct {
+	Value string `query:"$filter"`
+}
+
+type testNativePropertyCollision struct {
+	Limit int `json:"限度" query:"limit"`
+	Other int `json:"limit" query:"other"`
+}
+
 func TestGenerateErrors(t *testing.T) {
 	t.Parallel()
 	t.Run("existing output survives invalid later route", func(t *testing.T) {
@@ -71,6 +92,121 @@ func TestGenerateErrors(t *testing.T) {
 			t.Fatalf("existing output = %q, %v", data, err)
 		}
 	})
+	t.Run("query fields hidden from JSON", func(t *testing.T) {
+		t.Parallel()
+		type part struct {
+			Token string `query:"token"`
+		}
+		type otherPart struct{ Token string }
+		type deeper struct{ part }
+		type repeated struct {
+			Visible string `query:"visible"`
+			part
+			deeper
+		}
+		type ignored struct {
+			Visible string `query:"visible"`
+			Token   string `query:"token" json:"-"`
+		}
+		type private struct {
+			Visible string `query:"visible"`
+			token   string `query:"token"` //nolint:unused // Reflection-only field verifies hidden query metadata is rejected.
+		}
+		type ignoredEmbedding struct {
+			Visible string `query:"visible"`
+			part    `json:"-"`
+		}
+		type taggedEmbedding struct {
+			part `query:"nested"`
+		}
+		type shadowed struct {
+			Visible string `query:"visible"`
+			part
+			Token string
+		}
+		type ambiguous struct {
+			Visible string `query:"visible"`
+			part
+			otherPart
+		}
+		for _, tc := range []struct {
+			name  string
+			query reflect.Type
+			want  string
+		}{
+			{"ignored", reflect.TypeFor[ignored](), `apisdkgen.ignored.Token: query field "token" is not visible in JSON`},
+			{"unexported", reflect.TypeFor[private](), `apisdkgen.private.token: query field "token" is not visible in JSON`},
+			{"ignored embedding", reflect.TypeFor[ignoredEmbedding](), `apisdkgen.part.Token: query field "token" is not visible in JSON`},
+			{"tagged embedding", reflect.TypeFor[taggedEmbedding](), `apisdkgen.taggedEmbedding.part: query field "nested" is not visible in JSON`},
+			{"shadowed", reflect.TypeFor[shadowed](), `apisdkgen.part.Token: query field "token" is not visible in JSON`},
+			{"ambiguous", reflect.TypeFor[ambiguous](), `apisdkgen.part.Token: query field "token" is not visible in JSON`},
+			{"repeated owner", reflect.TypeFor[repeated](), `apisdkgen.part.Token: query field "token" is not visible in JSON`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{
+					SDKPackagePaths: map[string]struct{}{tc.query.PkgPath(): {}},
+					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError"},
+					Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Query: tc.query, Resp: reflect.TypeFor[testSDKEvent]()}},
+				}
+				api := NewAPI(t.TempDir(), "FixtureSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{TypeScript}
+				want := `version v1: invalid API specification: routes[0] ("list"): ` + tc.want
+				if err := api.Generate(); err == nil || err.Error() != want {
+					t.Fatalf("Generate() = %v; want %q", err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("unseeded alias name", func(t *testing.T) {
+		t.Parallel()
+		source := t.TempDir()
+		if err := os.WriteFile(filepath.Join(source, "types.go"), []byte("package fixture\ntype É string\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, lang := range []Language{Kotlin, Swift, TypeScript} {
+			t.Run(string(lang), func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{
+					KotlinPackage:   "fixture",
+					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
+					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError"},
+					Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Resp: reflect.TypeFor[testSDKEvent]()}},
+				}
+				api := NewAPI(filepath.Join(t.TempDir(), "sdk"), "FixtureSDK", NewVersion("v1", source, cfg))
+				api.Languages = []Language{lang}
+				const want = `version v1: invalid SDK types: invalid generated alias name "É"`
+				if err := api.Generate(); err == nil || err.Error() != want {
+					t.Fatalf("Generate() = %v; want %q", err, want)
+				}
+			})
+		}
+	})
+	t.Run("native property collision", func(t *testing.T) {
+		t.Parallel()
+		for _, lang := range []Language{Kotlin, Swift} {
+			t.Run(string(lang), func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{
+					KotlinPackage:   "fixture",
+					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
+					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError"},
+					Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Query: reflect.TypeFor[testNativePropertyCollision](), Resp: reflect.TypeFor[testSDKEvent]()}},
+				}
+				api := NewAPI(filepath.Join(t.TempDir(), "sdk"), "FixtureSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{lang}
+				want := `version v1: duplicate generated ` + string(lang) + ` property name "limit" in apisdkgen.testNativePropertyCollision`
+				if err := api.Generate(); err == nil || err.Error() != want {
+					t.Fatalf("Generate() = %v; want %q", err, want)
+				}
+			})
+		}
+	})
+
 	t.Run("invalid specification", func(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
@@ -136,16 +272,29 @@ func TestGenerateErrors(t *testing.T) {
 			{"invalid query parameter", func(c *apispec.Config[string]) { c.Routes[0].QueryParams = []string{"page-size"} }, `routes[0] ("getEvent"): invalid query parameter "page-size"`},
 			{"duplicate query parameter", func(c *apispec.Config[string]) { c.Routes[0].QueryParams = []string{"page", "page"} }, `routes[0] ("getEvent"): duplicate parameter "page"`},
 			{"argument collision", func(c *apispec.Config[string]) { c.Routes[0].Path = "/{headers}"; c.Routes[0].HeadersArg = true }, `routes[0] ("getEvent"): parameter "headers" conflicts with a generated argument`},
-			{"missing query request", func(c *apispec.Config[string]) { c.Routes[0].QueryFromReq = true }, `routes[0] ("getEvent"): query request must be a struct`},
-			{"missing query field", func(c *apispec.Config[string]) {
-				c.Routes[0].QueryFromReq = true
-				c.Routes[0].Req = reflect.TypeFor[testSDKEvent]()
+			{"nonstruct query", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testGeneratedErrorCode]() }, `routes[0] ("getEvent"): query type must be a struct`},
+			{"no query fields", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testSDKEvent]() }, `routes[0] ("getEvent"): query type apisdkgen.testSDKEvent has no query-tagged JSON fields`},
+			{"mixed query modes", func(c *apispec.Config[string]) {
+				c.Routes[0].Query = reflect.TypeFor[testEmbeddedQueryRequest]()
 				c.Routes[0].QueryParams = []string{"cursor"}
-			}, `routes[0] ("getEvent"): missing query field "cursor"`},
-			{"native query request", func(c *apispec.Config[string]) {
-				c.Routes[0].QueryFromReq = true
-				c.Routes[0].Req = reflect.TypeFor[testSDKEvent]()
-			}, `routes[0] ("getEvent"): QueryFromReq is supported only by TypeScript output`},
+			}, `routes[0] ("getEvent"): typed query cannot be combined with QueryParams`},
+			{"nonidentifier query name", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testDollarQueryName]() }, `routes[0] ("getEvent"): invalid or duplicate query field "$filter"`},
+			{"nonASCII query name", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testInvalidQueryName]() }, `routes[0] ("getEvent"): invalid or duplicate query field "限度"`},
+			{"nonASCII route name", func(c *apispec.Config[string]) { c.Routes[0].Name = "líst" }, `routes[0] ("líst"): invalid name "líst"`},
+			{"nonscalar query field", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testNonScalarQuery]() }, `routes[0] ("getEvent"): query field "values" has nonscalar type []string`},
+			{"duplicate query field", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testDuplicateQuery]() }, `routes[0] ("getEvent"): invalid or duplicate query field "same"`},
+			{"query argument collision", func(c *apispec.Config[string]) {
+				c.Routes[0].Query = reflect.TypeFor[testEmbeddedQueryRequest]()
+				c.Routes[0].Path = "/{query}"
+			}, `routes[0] ("getEvent"): parameter "query" conflicts with a generated argument`},
+			{"query helper collision", func(c *apispec.Config[string]) {
+				c.Routes[0].Query = reflect.TypeFor[testEmbeddedQueryFields]()
+				c.Routes[0].Name = "queryPath"
+			}, `routes[0] ("queryPath"): duplicate native method "queryPath"`},
+			{"nonscalar query mapping", func(c *apispec.Config[string]) {
+				c.Routes[0].Query = reflect.TypeFor[testNonScalarQuery]()
+				c.SpecialTypes = []apispec.SpecialType{{Type: reflect.TypeFor[[]string](), TSType: "string[]", KTType: "List<String>", SwiftType: "[String]"}}
+			}, `routes[0] ("getEvent"): query field "values" must map to a scalar in each selected language`},
 			{"non GET SSE", func(c *apispec.Config[string]) { c.Routes[0].IsSSE = true; c.Routes[0].Method = "POST" }, `routes[0] ("getEvent"): SSE method must be GET`},
 			{"events without SSE", func(c *apispec.Config[string]) {
 				c.Routes[0].SSEEvents = []apispec.SSEEvent{{Name: "ready", Handler: "onReady"}}

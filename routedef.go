@@ -3,7 +3,6 @@
 package apisdkgen
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -37,7 +36,7 @@ func routeCategoryName(r *apispec.Route) string {
 	return strings.ToUpper(p[:1]) + p[1:]
 }
 
-func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *strings.Builder, params []string) error {
+func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
@@ -50,10 +49,11 @@ func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *s
 	for _, p := range params {
 		args = append(args, p+": string")
 	}
-	if !r.QueryFromReq {
-		for _, q := range r.QueryParams {
-			args = append(args, q+": string")
-		}
+	for _, q := range r.QueryParams {
+		args = append(args, q+": string")
+	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
 	}
 	hasReq := r.Req != nil
 	if hasReq {
@@ -63,29 +63,23 @@ func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *s
 		args = append(args, "headers: Record<string, string> = {}")
 	}
 
-	queryParams := r.QueryParams
-	if r.QueryFromReq {
-		queryParams = nil
-	}
-	tsPath := buildTSPath(r.Path, params, queryParams)
-	if r.QueryFromReq {
-		fields, err := routeQueryFields(d, r)
-		if err != nil {
-			return fmt.Errorf("%s: %w", r.Name, err)
-		}
+	tsPath := buildTSPath(r.Path, params, r.QueryParams)
+	if r.Query != nil {
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => {\n", r.Name, strings.Join(args, ", "), respType)
-		b.WriteString("      const query = new URLSearchParams();\n")
-		for i, q := range r.QueryParams {
-			field := fields[i]
-			fmt.Fprintf(b, "      if (req.%s !== undefined && req.%s !== null) query.set(%q, String(req.%s));\n", field, field, q, field)
+		writeTSQuery(b, fields)
+		bodyArg := ""
+		if hasReq || r.HeadersArg {
+			bodyArg = ", undefined"
+			if hasReq {
+				bodyArg = ", req"
+			}
 		}
-		headerArg := ""
 		if r.HeadersArg {
-			headerArg = ", undefined, headers"
+			bodyArg += ", headers"
 		}
-		fmt.Fprintf(b, "      return request<%s>(%q, %s + (query.size ? `?${query}` : \"\")%s);\n", respType, r.Method, tsPath, headerArg)
+		fmt.Fprintf(b, "      return request<%s>(%q, %s + (search.size ? `?${search}` : \"\")%s);\n", respType, r.Method, tsPath, bodyArg)
 		b.WriteString("    },\n")
-		return nil
+		return
 	}
 
 	headerArg := ""
@@ -100,7 +94,15 @@ func writeRouteTSJSONMethod[C ~string](d *docRegistry[C], r *apispec.Route, b *s
 	default:
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath)
 	}
-	return nil
+}
+
+// writeTSQuery emits the common scalar query encoder for JSON and SSE methods.
+func writeTSQuery(b *strings.Builder, fields []queryField) {
+	b.WriteString("      const search = new URLSearchParams();\n")
+	for _, f := range fields {
+		value := "query[" + fmt.Sprintf("%q", f.jsonName) + "]"
+		fmt.Fprintf(b, "      if (%s !== undefined && %s !== null) search.set(%q, String(%s));\n", value, value, f.name, value)
+	}
 }
 
 func routeTSSSEHandlersName(r *apispec.Route) string {
@@ -126,7 +128,7 @@ func writeRouteTSSSEHandlers(r *apispec.Route, b *strings.Builder) {
 	b.WriteString("}\n\n")
 }
 
-func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
@@ -134,11 +136,18 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": string")
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+	}
 	tsPath := buildTSPath(r.Path, params, r.QueryParams)
 	respName := routeRespName(r)
 	validatorName := "validate" + respName
 	args = append(args, "handlers: "+routeTSSSEHandlersName(r))
 	fmt.Fprintf(b, "    %s: (%s): EventSource => {\n", r.Name, strings.Join(args, ", "))
+	if r.Query != nil {
+		writeTSQuery(b, fields)
+		tsPath += " + (search.size ? `?${search}` : \"\")"
+	}
 	fmt.Fprintf(b, "      const es = new EventSource(%s);\n", tsPath)
 	b.WriteString("      es.addEventListener(\"message\", (e) => {\n")
 	b.WriteString("        try {\n")
@@ -174,7 +183,7 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	b.WriteString("    },\n")
 }
 
-func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
@@ -191,6 +200,9 @@ func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []str
 	for _, q := range r.QueryParams {
 		args = append(args, q+": String")
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+	}
 	hasReq := r.Req != nil
 	if hasReq {
 		args = append(args, "req: "+routeReqName(r))
@@ -200,6 +212,9 @@ func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []str
 	}
 
 	ktPath := buildKotlinPath(r.Path, r.QueryParams)
+	if r.Query != nil {
+		ktPath = kotlinQueryPath(ktPath, fields)
+	}
 
 	sig := strings.Join(args, ", ")
 	headersArg := ""
@@ -216,7 +231,7 @@ func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []str
 	}
 }
 
-func writeRouteKotlinSSEFunc(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteKotlinSSEFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
@@ -224,15 +239,21 @@ func writeRouteKotlinSSEFunc(r *apispec.Route, b *strings.Builder, params []stri
 	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": String")
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+	}
 	args = append(args, routeKotlinSSECallbackArgs(r)...)
 	ktPath := buildKotlinPath(r.Path, r.QueryParams)
+	if r.Query != nil {
+		ktPath = kotlinQueryPath(ktPath, fields)
+	}
 	respName := routeRespName(r)
 	if len(r.SSEEvents) != 0 {
 		fmt.Fprintf(b, "    fun %s(%s): Flow<%s> = namedSSEFlow(%s, lastEventID, onEventID) { type, data ->\n", r.Name, strings.Join(args, ", "), respName, ktPath)
 		b.WriteString("        when (type) {\n")
 		fmt.Fprintf(b, "            \"message\" -> json.decodeFromString<%s>(data)\n", respName)
 		for _, e := range r.SSEEvents {
-			fmt.Fprintf(b, "            %q -> { ", e.Name)
+			fmt.Fprintf(b, "            %s -> { ", kotlinStringLiteral(e.Name))
 			if e.Resp == nil {
 				fmt.Fprintf(b, "%s?.invoke()", e.Handler)
 			} else {
@@ -275,6 +296,10 @@ func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, para
 		args = append(args, p+": String")
 		callArgs = append(callArgs, p)
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+		callArgs = append(callArgs, "query")
+	}
 	args = append(args, routeKotlinSSECallbackArgs(r)...)
 	if len(r.SSEEvents) != 0 {
 		for _, e := range r.SSEEvents {
@@ -289,7 +314,7 @@ func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, para
 		reconnectName, strings.Join(args, ", "), routeRespName(r), r.Name, strings.Join(callArgs, ", "))
 }
 
-func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatSwiftDoc(r.Doc, "    "))
 	}
@@ -305,6 +330,9 @@ func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []stri
 	for _, q := range r.QueryParams {
 		args = append(args, q+": String")
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+	}
 	hasReq := r.Req != nil
 	if hasReq {
 		args = append(args, "req: "+routeReqName(r))
@@ -313,6 +341,9 @@ func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []stri
 		args = append(args, "headers: [String: String] = [:]")
 	}
 	swiftPath := buildSwiftPath(r.Path, r.QueryParams)
+	if r.Query != nil {
+		swiftPath = swiftQueryPath(swiftPath, fields)
+	}
 
 	fmt.Fprintf(b, "    public func %s(%s) async throws -> %s {\n", r.Name, strings.Join(args, ", "), respType)
 	headersArg := ""
@@ -327,7 +358,7 @@ func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []stri
 	b.WriteString("    }\n")
 }
 
-func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatSwiftDoc(r.Doc, "    "))
 	}
@@ -335,14 +366,23 @@ func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []strin
 	for _, p := range slices.Concat(params, r.QueryParams) {
 		args = append(args, p+": String")
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+	}
 	args = append(args, routeSwiftSSECallbackArgs(r)...)
 	swiftPath := buildSwiftPath(r.Path, r.QueryParams)
 	respName := routeRespName(r)
 	fmt.Fprintf(b, "    public func %s(%s) -> AsyncThrowingStream<%s, Error> {\n", r.Name, strings.Join(args, ", "), respName)
+	indent, result := "        ", ""
+	if r.Query != nil {
+		b.WriteString("        do {\n")
+		indent, result = "            ", "return "
+		swiftPath = swiftQueryPath(swiftPath, fields)
+	}
 	if len(r.SSEEvents) != 0 {
-		fmt.Fprintf(b, "        namedSSEStream(path: %s, lastEventID: lastEventID, onEventID: onEventID) { type, data in\n            switch type {\n            case \"message\": return try self.decoder.decode(%s.self, from: data)\n", swiftPath, respName)
+		fmt.Fprintf(b, "%s%snamedSSEStream(path: %s, lastEventID: lastEventID, onEventID: onEventID) { type, data in\n%s    switch type {\n%s    case \"message\": return try self.decoder.decode(%s.self, from: data)\n", indent, result, swiftPath, indent, indent, respName)
 		for _, e := range r.SSEEvents {
-			fmt.Fprintf(b, "            case %q: ", e.Name)
+			fmt.Fprintf(b, "%s    case %q: ", indent, e.Name)
 			if e.Resp == nil {
 				fmt.Fprintf(b, "%s?()", e.Handler)
 			} else {
@@ -350,13 +390,15 @@ func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []strin
 			}
 			b.WriteString("; return nil\n")
 		}
-		b.WriteString("            default: return nil\n            }\n        }\n    }\n")
-		return
+		fmt.Fprintf(b, "%s    default: return nil\n%s    }\n%s}\n", indent, indent, indent)
+	} else {
+		fmt.Fprintf(b, "%s%ssseStream(path: %s, decodeFailure: .discard)\n", indent, result, swiftPath)
 	}
-	fmt.Fprintf(b, "        sseStream(path: %s, decodeFailure: .discard)\n", swiftPath)
+	if r.Query != nil {
+		b.WriteString("        } catch { return AsyncThrowingStream { $0.finish(throwing: error) } }\n")
+	}
 	b.WriteString("    }\n")
 }
-
 func routeSwiftSSECallbackArgs(r *apispec.Route) []string {
 	if len(r.SSEEvents) == 0 {
 		return nil
@@ -372,7 +414,7 @@ func routeSwiftSSECallbackArgs(r *apispec.Route) []string {
 	return append(args, "lastEventID: String? = nil", "onEventID: ((String) -> Void)? = nil")
 }
 
-func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, params []string) {
+func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	allParams := slices.Concat(params, r.QueryParams)
 	args := make([]string, 0, len(allParams))
 	callArgs := make([]string, 0, len(allParams))
@@ -380,22 +422,41 @@ func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, param
 		args = append(args, p+": String")
 		callArgs = append(callArgs, p+": "+p)
 	}
+	if r.Query != nil {
+		args = append(args, "query: "+r.Query.Name())
+		callArgs = append(callArgs, "query: query")
+	}
 	args = append(args, routeSwiftSSECallbackArgs(r)...)
 	reconnectName := r.Name + "Reconnecting"
 	respName := routeRespName(r)
 	fmt.Fprintf(b, "    public func %s(%s) -> AsyncThrowingStream<%s, Error> {\n",
 		reconnectName, strings.Join(args, ", "), respName)
+	wrapQuery := r.Query != nil && len(r.SSEEvents) == 0
+	indent := "        "
+	if wrapQuery {
+		b.WriteString("        do {\n")
+		indent = "            "
+	}
 	if len(r.SSEEvents) != 0 {
 		for _, e := range r.SSEEvents {
 			callArgs = append(callArgs, e.Handler+": "+e.Handler)
 		}
 		callArgs = append(callArgs, "lastEventID: resumeID.get()", "onEventID: { resumeID.set($0); onEventID?($0) }")
 		b.WriteString("        // Each returned stream owns its cursor; create another stream for independent consumption.\n        let resumeID = SSECursor(lastEventID)\n")
-		fmt.Fprintf(b, "        return reconnectingStream { self.%s(%s) }\n    }\n", r.Name, strings.Join(callArgs, ", "))
-		return
+		fmt.Fprintf(b, "        return reconnectingStream { self.%s(%s) }\n", r.Name, strings.Join(callArgs, ", "))
+	} else {
+		fmt.Fprintf(b, "%s// Reconnecting plain streams terminate on malformed payloads.\n", indent)
+		path := buildSwiftPath(r.Path, r.QueryParams)
+		result := ""
+		if r.Query != nil {
+			fmt.Fprintf(b, "%slet queryURL = %s\n", indent, swiftQueryPath(path, fields))
+			path, result = "queryURL", "return "
+		}
+		fmt.Fprintf(b, "%s%sreconnectingStream { self.sseStream(path: %s, decodeFailure: .terminate) }\n", indent, result, path)
 	}
-	b.WriteString("        // Reconnecting plain streams terminate on malformed payloads.\n")
-	fmt.Fprintf(b, "        reconnectingStream { self.sseStream(path: %s, decodeFailure: .terminate) }\n", buildSwiftPath(r.Path, r.QueryParams))
+	if wrapQuery {
+		b.WriteString("        } catch { return AsyncThrowingStream { $0.finish(throwing: error) } }\n")
+	}
 	b.WriteString("    }\n")
 }
 
@@ -403,7 +464,7 @@ func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, param
 // templates for paths with parameters and appends URL-encoded query values.
 func buildKotlinPath(path string, queryParams []string) string {
 	var b strings.Builder
-	quoted := fmt.Sprintf("%q", path)
+	quoted := kotlinStringLiteral(path)
 	b.WriteString(pathParamRe.ReplaceAllStringFunc(quoted[1:len(quoted)-1], func(match string) string {
 		name := match[1 : len(match)-1]
 		return "$" + name
@@ -468,31 +529,83 @@ func buildSwiftPath(path string, queryParams []string) string {
 	return "\"" + b.String() + "\""
 }
 
-// routeQueryFields resolves query parameters to their emitted JSON field names.
-func routeQueryFields[C ~string](d *docRegistry[C], r *apispec.Route) ([]string, error) {
-	if r.Req == nil || r.Req.Kind() != reflect.Struct {
-		return nil, errors.New("query request must be a struct")
+// queryField connects a query wire name with its generated DTO property.
+type queryField struct {
+	name     string
+	jsonName string
+	field    reflect.StructField
+}
+
+// routeQueryFields resolves query tags on the DTO's visible JSON fields.
+func routeQueryFields[C ~string](d *docRegistry[C], r *apispec.Route) ([]queryField, error) {
+	if r.Query == nil {
+		return nil, nil
 	}
-	fields, err := jsonFields(d.cfg, r.Req)
+	fields, err := jsonFields(d.cfg, r.Query)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(r.QueryParams))
-	for _, query := range r.QueryParams {
-		name := ""
-		for _, field := range fields {
-			if field.field.Tag.Get("query") == query {
-				name = field.field.Name
-				if jsonName, _, _ := strings.Cut(field.field.Tag.Get("json"), ","); jsonName != "" && jsonName != "-" {
-					name = jsonName
+	var walk func(reflect.Type, []int, []reflect.Type) error
+	walk = func(owner reflect.Type, parent []int, active []reflect.Type) error {
+		for sf := range owner.Fields() {
+			index := append(slices.Clone(parent), sf.Index...)
+			if name := sf.Tag.Get("query"); name != "" && name != "-" {
+				visible := slices.ContainsFunc(fields, func(f jsonField) bool { return slices.Equal(f.index, index) })
+				if !visible {
+					return fmt.Errorf("%s.%s: query field %q is not visible in JSON", owner, sf.Name, name)
 				}
-				break
+			}
+			base := sf.Type
+			if base.Kind() == reflect.Pointer {
+				base = base.Elem()
+			}
+			jsonName, _ := parseJSONTag(sf.Tag.Get("json"))
+			if sf.Anonymous && base.Kind() == reflect.Struct && (jsonName == "" || sf.Tag.Get("json") == "-") && !slices.Contains(active, base) {
+				if err := walk(base, index, append(slices.Clone(active), base)); err != nil {
+					return err
+				}
 			}
 		}
-		if name == "" {
-			return nil, fmt.Errorf("missing query field %q", query)
+		return nil
+	}
+	if err := walk(r.Query, nil, []reflect.Type{r.Query}); err != nil {
+		return nil, err
+	}
+	var result []queryField
+	var names []string
+	for _, f := range fields {
+		name := f.field.Tag.Get("query")
+		if name == "" || name == "-" {
+			continue
+		}
+		if !isIdentifier(name) || slices.Contains(names, name) {
+			return nil, fmt.Errorf("invalid or duplicate query field %q", name)
 		}
 		names = append(names, name)
+		jsonName, _ := parseJSONTag(f.field.Tag.Get("json"))
+		if jsonName == "" {
+			jsonName = f.field.Name
+		}
+		result = append(result, queryField{name, jsonName, f.field})
 	}
-	return names, nil
+	if len(result) == 0 {
+		return nil, fmt.Errorf("query type %s has no query-tagged JSON fields", r.Query)
+	}
+	return result, nil
+}
+
+func kotlinQueryPath(path string, fields []queryField) string {
+	pairs := make([]string, 0, len(fields))
+	for _, f := range fields {
+		pairs = append(pairs, fmt.Sprintf("%s to %s", kotlinStringLiteral(f.name), kotlinStringLiteral(f.jsonName)))
+	}
+	return "this.queryPath(" + path + ", query, mapOf(" + strings.Join(pairs, ", ") + "))"
+}
+
+func swiftQueryPath(path string, fields []queryField) string {
+	pairs := make([]string, 0, len(fields))
+	for _, f := range fields {
+		pairs = append(pairs, fmt.Sprintf("(%q, %q)", f.name, f.jsonName))
+	}
+	return "try self.queryPath(" + path + ", query, [" + strings.Join(pairs, ", ") + "])"
 }

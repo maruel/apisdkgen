@@ -108,7 +108,6 @@ func TestRoute(t *testing.T) {
 				{"duplicate parameter", func(r *Route) { r.Path = "/{id}"; r.QueryParams = []string{"id"} }, `duplicate parameter "id"`},
 				{"SSE request", func(r *Route) { r.IsSSE = true; r.Req = reflect.TypeFor[testResponse]() }, "SSE routes do not support request types"},
 				{"SSE array", func(r *Route) { r.IsSSE = true; r.IsArray = true }, "SSE routes do not support array responses"},
-				{"SSE query request", func(r *Route) { r.IsSSE = true; r.QueryFromReq = true }, "SSE routes do not support request-derived queries"},
 				{"SSE headers", func(r *Route) { r.IsSSE = true; r.HeadersArg = true }, "SSE routes do not support custom header arguments"},
 				{"events require SSE", func(r *Route) { r.SSEEvents = []SSEEvent{{Name: "ready", Handler: "onReady"}} }, "SSEEvents requires IsSSE"},
 			} {

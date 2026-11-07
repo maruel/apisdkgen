@@ -31,34 +31,24 @@ func TestWriteRouteTSJSONMethod(t *testing.T) {
 		}{
 			{"scoped query", apispec.Route{
 				Name: "list", Method: "GET", Path: "/api/v1/workspaces/{wsID}/items/{id}",
-				Req: reflect.TypeFor[query](), Resp: reflect.TypeFor[query](),
-				QueryFromReq: true, QueryParams: []string{"limit", "unread_only"},
+				Query: reflect.TypeFor[query](), Resp: reflect.TypeFor[query](),
 			}, []string{"id"}},
 			{"embedded query", apispec.Route{
 				Name: "list", Method: "GET", Path: "/items",
-				Req: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testEmbeddedQueryRequest](),
-				QueryFromReq: true, QueryParams: []string{"limit"},
+				Query: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testEmbeddedQueryRequest](),
 			}, nil},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				d := &docRegistry[string]{cfg: &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEmbeddedQueryRequest]().PkgPath(): {}}}}
 				var b strings.Builder
-				if err := writeRouteTSJSONMethod(d, &tc.route, &b, tc.params); err != nil {
+				fields, err := routeQueryFields(d, &tc.route)
+				if err != nil {
 					t.Fatal(err)
 				}
+				writeRouteTSJSONMethod(&tc.route, &b, tc.params, fields)
 				assertGolden(t, "method.ts", b.String())
 			})
 		}
-	})
-	t.Run("error", func(t *testing.T) {
-		t.Run("missing query field", func(t *testing.T) {
-			d := &docRegistry[string]{cfg: &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEmbeddedQueryRequest]().PkgPath(): {}}}}
-			r := apispec.Route{Name: "list", Req: reflect.TypeFor[query](), Resp: reflect.TypeFor[query](), QueryFromReq: true, QueryParams: []string{"missing"}}
-			err := writeRouteTSJSONMethod(d, &r, &strings.Builder{}, nil)
-			if err == nil || err.Error() != `list: missing query field "missing"` {
-				t.Fatalf("got %v, want missing query field error", err)
-			}
-		})
 	})
 }
 
@@ -85,7 +75,7 @@ func TestWriteRouteTSSSEMethod(t *testing.T) {
 	t.Parallel()
 	r := apispec.Route{Name: "events", Path: "/items/{id}/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor", "filter"}}
 	var b strings.Builder
-	writeRouteTSSSEMethod(&r, &b, []string{"id"})
+	writeRouteTSSSEMethod(&r, &b, []string{"id"}, nil)
 	assertGolden(t, "method.ts", b.String())
 }
 
@@ -93,7 +83,7 @@ func TestWriteRouteKotlinSSEFunc(t *testing.T) {
 	t.Parallel()
 	r := apispec.Route{Name: "events", Path: "/items/{id}/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor", "filter"}}
 	var b strings.Builder
-	writeRouteKotlinSSEFunc(&r, &b, []string{"id"})
+	writeRouteKotlinSSEFunc(&r, &b, []string{"id"}, nil)
 	assertGolden(t, "method.kt", b.String())
 }
 
@@ -101,6 +91,6 @@ func TestWriteRouteSwiftSSEFunc(t *testing.T) {
 	t.Parallel()
 	r := apispec.Route{Name: "events", Path: "/items/{id}/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor", "filter"}}
 	var b strings.Builder
-	writeRouteSwiftSSEFunc(&r, &b, []string{"id"})
+	writeRouteSwiftSSEFunc(&r, &b, []string{"id"}, nil)
 	assertGolden(t, "method.swift", b.String())
 }

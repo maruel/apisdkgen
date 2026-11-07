@@ -18,6 +18,8 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
+var identifierRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 var pathParamRe = regexp.MustCompile(`\{(\w+)\}`)
 
 // swiftReservedWords is the set of Swift keywords that require backtick escaping
@@ -33,6 +35,11 @@ var swiftReservedWords = map[string]struct{}{
 	"as": {}, "is": {}, "nil": {}, "true": {}, "false": {},
 	"self": {}, "Self": {}, "super": {}, "static": {}, "operator": {},
 	"type": {},
+}
+
+// kotlinStringLiteral escapes interpolation in Kotlin string data.
+func kotlinStringLiteral(value string) string {
+	return strings.ReplaceAll(strconv.Quote(value), "$", `\$`)
 }
 
 // loadDocsInDir parses Go source files in dir and extracts documentation

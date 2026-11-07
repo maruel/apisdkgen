@@ -162,6 +162,9 @@ func validateSDKTypes[C ~string](c *apispec.Config[C], aliases []aliasInfo, out 
 func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, types []reflect.Type, out outputPaths) error {
 	aliasNames := map[string]struct{}{}
 	for _, a := range aliases {
+		if !isIdentifier(a.name) {
+			return fmt.Errorf("invalid generated alias name %q", a.name)
+		}
 		aliasNames[a.name] = struct{}{}
 	}
 	names := map[string]reflect.Type{}
@@ -191,6 +194,9 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 		tsImports[r.Resp.Name()] = struct{}{}
 		if r.Req != nil {
 			tsImports[r.Req.Name()] = struct{}{}
+		}
+		if r.Query != nil {
+			tsImports[r.Query.Name()] = struct{}{}
 		}
 		for _, e := range r.SSEEvents {
 			if e.Resp != nil {
@@ -256,6 +262,11 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 		ktReserved[n] = struct{}{}
 	}
 	swReserved := map[string]struct{}{}
+	if hasTypedQueries(c) {
+		for _, n := range []string{"CoreFoundation", "Foundation", "Swift"} {
+			swReserved[n] = struct{}{}
+		}
+	}
 	for _, n := range []string{"ApiClient", "ApiError", "Bool", "Double", "ISOTimestamp", "Int", "JSONValue", "String"} {
 		swReserved[n] = struct{}{}
 	}
@@ -405,6 +416,9 @@ func routeSeedTypes[C ~string](c *apispec.Config[C]) []reflect.Type {
 		if r.Req != nil {
 			seeds = append(seeds, r.Req)
 		}
+		if r.Query != nil {
+			seeds = append(seeds, r.Query)
+		}
 		seeds = append(seeds, r.Resp)
 		for j := range r.SSEEvents {
 			if r.SSEEvents[j].Resp != nil {
@@ -518,4 +532,13 @@ func goTypeToDoc[C ~string](c *apispec.Config[C], t reflect.Type) (string, error
 	default:
 		return "", fmt.Errorf("goTypeToDoc: unhandled kind %s for %s", t.Kind(), t)
 	}
+}
+
+func hasTypedQueries[C ~string](c *apispec.Config[C]) bool {
+	for i := range c.Routes {
+		if c.Routes[i].Query != nil {
+			return true
+		}
+	}
+	return false
 }

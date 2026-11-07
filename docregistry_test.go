@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +28,18 @@ type testJSONRPCResponse struct{}
 type testSDKEvent struct {
 	Kind string `json:"kind"`
 	Text string `json:"text,omitempty"`
+}
+
+type testQueryIDs []string
+
+type testQueryInput struct {
+	Path  string        `json:"-" path:"id"`
+	Limit *int          `json:"limit" query:"limit"`
+	Only  *bool         `json:"unread" query:"unread_only"`
+	Text  *string       `json:"text" query:"q"`
+	IDs   *testQueryIDs `json:"ids" query:"ids"`
+	Maybe *string       `json:"maybe,omitempty" query:"maybe"`
+	Extra string        `json:"extra"`
 }
 
 type testSSEError struct {
@@ -804,7 +819,7 @@ func TestGenerate(t *testing.T) {
 			SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
 			ExtraSeeds:      []reflect.Type{reflect.TypeFor[testGeneratedErrorResponse]()},
 			ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse", TSDetailsExpr: "undefined"},
-			Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Req: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent](), QueryFromReq: true, QueryParams: []string{"limit"}, HeadersArg: true}},
+			Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Query: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent](), HeadersArg: true}},
 		}
 		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
 		api.Languages = []Language{TypeScript}
@@ -1123,6 +1138,158 @@ if (false) client.rawEvents("", handlers);
 				t.Fatalf("Swift runtime failed: %v\n%s", err, out)
 			}
 		})
+	})
+	t.Run("typed query module names", func(t *testing.T) {
+		t.Parallel()
+		type Foundation struct{}
+		type CoreFoundation struct{}
+		type Swift struct{}
+		for _, typ := range []reflect.Type{reflect.TypeFor[Foundation](), reflect.TypeFor[CoreFoundation](), reflect.TypeFor[Swift]()} {
+			t.Run(typ.Name(), func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{
+					SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}},
+					ExtraSeeds:      []reflect.Type{typ, reflect.TypeFor[testSSEError]()},
+					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError"},
+					Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Query: reflect.TypeFor[testEmbeddedQueryFields](), Resp: reflect.TypeFor[testSDKEvent]()}},
+				}
+				api := NewAPI(t.TempDir(), "FixtureSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{Language("Swift")}
+				want := `version v1: invalid SDK types: generated Swift type name "` + typ.Name() + `" conflicts with a generated declaration`
+				if err := api.Generate(); err == nil || err.Error() != want {
+					t.Fatalf("Generate() = %v; want %q", err, want)
+				}
+			})
+		}
+	})
+
+	t.Run("typed query inputs", func(t *testing.T) {
+		t.Parallel()
+		for _, lang := range []Language{Kotlin, Swift, TypeScript} {
+			t.Run(string(lang), func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{
+					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testQueryInput]().PkgPath(): {}},
+					KotlinPackage:   "querycheck",
+					APIDocTitle:     "Typed query fixture",
+					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError", TSCodeExpr: `"UNKNOWN"`, TSMessageExpr: "err.message", TSDetailsExpr: "undefined", KTCodeExpr: `"UNKNOWN"`, KTMessageExpr: "err.message", KTDetailsExpr: "null", SwiftCodeExpr: `"UNKNOWN"`, SwiftMessageExpr: "errResp.message", SwiftDetailsExpr: "nil"},
+					SpecialTypes:    []apispec.SpecialType{{Type: reflect.TypeFor[testQueryIDs](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}},
+					Routes: []apispec.Route{
+						{Name: "list", Method: "GET", Path: "/items/{queryPath}", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent]()},
+						{Name: "update", Method: "POST", Path: "/items", Query: reflect.TypeFor[testQueryInput](), Req: reflect.TypeFor[testSDKEvent](), Resp: reflect.TypeFor[testSDKEvent](), HeadersArg: true},
+						{Name: "events", Path: "/events", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true},
+						{Name: "namedEvents", Path: "/events", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, SSEEvents: []apispec.SSEEvent{{Name: "ready", Handler: "onReady"}}},
+					},
+				}
+				if lang == Kotlin {
+					type Pair struct{}
+					cfg.ExtraSeeds = append(cfg.ExtraSeeds, reflect.TypeFor[Pair]())
+				}
+				if lang == Swift {
+					type NSNumber struct{}
+					type JSONSerialization struct{}
+					type NSNull struct{}
+					type CharacterSet struct{}
+					type CFGetTypeID struct{}
+					type CFBooleanGetTypeID struct{}
+					type Encodable struct{}
+					cfg.ExtraSeeds = append(cfg.ExtraSeeds, reflect.TypeFor[NSNumber](), reflect.TypeFor[JSONSerialization](), reflect.TypeFor[NSNull](), reflect.TypeFor[CharacterSet](), reflect.TypeFor[CFGetTypeID](), reflect.TypeFor[CFBooleanGetTypeID](), reflect.TypeFor[Encodable]())
+				}
+				dir := t.TempDir()
+				api := NewAPI(dir, "QuerySDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{lang}
+				if err := api.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				if lang == TypeScript {
+					doc, err := fs.ReadFile(os.DirFS(dir), "API.v1.md")
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertGolden(t, "API.md", string(doc))
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					want := url.Values{"limit": {"0"}, "unread_only": {"false"}, "q": {"a +&雪"}, "ids": {"a,b"}}
+					switch r.URL.Path {
+					case "/items/blank":
+						want.Set("q", "")
+					case "/items/empty":
+						want = url.Values{}
+					}
+					if diff := cmp.Diff(want, r.URL.Query()); diff != "" || r.URL.ForceQuery {
+						t.Errorf("%s query (-want +got): %s; trailing query delimiter: %v", r.URL.Path, diff, r.URL.ForceQuery)
+						http.Error(w, "bad query", 400)
+						return
+					}
+					if r.Method == "POST" {
+						var body testSDKEvent
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Kind != "request" || r.Header.Get("X-Test") != "expected" {
+							t.Errorf("body/headers: %v, %+v, %v", err, body, r.Header)
+							http.Error(w, "bad body", 400)
+							return
+						}
+					} else if r.ContentLength > 0 {
+						t.Error("GET query sent a JSON body")
+					}
+					if r.URL.Path == "/events" {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write([]byte("data: {\"kind\":\"listed\"}\n\n"))
+					} else {
+						_, _ = w.Write([]byte(`{"kind":"listed"}`))
+					}
+				}))
+				t.Cleanup(server.Close)
+				var cmds []*exec.Cmd
+				switch lang {
+				case TypeScript:
+					dir = filepath.Join(dir, "ts", "v1")
+					data, err := os.ReadFile("testdata/QueryClient.ts")
+					if err != nil {
+						t.Fatal(err)
+					}
+					// #nosec G703 -- Source is written only under this test's private generated output.
+					if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					runtimeDir := t.TempDir()
+					// #nosec G204 G702 -- Fixed compilers and flags consume trusted fixtures and isolated test outputs without a shell.
+					cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts"), exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js"), server.URL)}
+				case Kotlin:
+					cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+					if cp == "" {
+						t.Skip("set APISDKGEN_KOTLIN_CLASSPATH for Kotlin runtime")
+					}
+					dir = filepath.Join(dir, "kotlin", "src", "main", "kotlin", cfg.KotlinPackage)
+					fixture, err := filepath.Abs("testdata/QueryClient.kt")
+					if err != nil {
+						t.Fatal(err)
+					}
+					// #nosec G204 G702 -- Fixed compilers and flags consume trusted fixtures and isolated test outputs without a shell.
+					cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN"), "ApiClient.kt", "Types.kt", fixture, "-include-runtime", "-d", "runtime.jar"), exec.CommandContext(t.Context(), "java", "-cp", "runtime.jar"+string(os.PathListSeparator)+cp, "querycheck.QueryClientKt", server.URL)}
+				case Swift:
+					if runtime.GOOS != "linux" {
+						t.Skip("query fixture supplies Linux byte transport")
+					}
+					if _, err := exec.LookPath("swiftc"); err != nil {
+						t.Skip("Swift compiler is optional")
+					}
+					dir = filepath.Join(dir, "swift", "Sources", "QuerySDKV1")
+					fixture, err := filepath.Abs("testdata/QueryClient.swift")
+					if err != nil {
+						t.Fatal(err)
+					}
+					// #nosec G204 G702 -- Fixed compilers and flags consume trusted fixtures and isolated test outputs without a shell.
+					cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", "ApiClient.swift", "Types.swift", fixture, "-o", "runtime"), exec.CommandContext(t.Context(), filepath.Join(dir, "runtime"), server.URL)}
+				}
+				for _, cmd := range cmds {
+					cmd.Dir = dir
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Fatalf("%s: %v\n%s", cmd.Path, err, out)
+					}
+				}
+			})
+		}
 	})
 }
 

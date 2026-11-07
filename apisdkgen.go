@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -49,6 +50,9 @@ func (o *outputPaths) validate[C ~string](cfg *apispec.Config[C]) error {
 		}
 	}
 	nativeNames := map[string]struct{}{}
+	if hasTypedQueries(cfg) {
+		nativeNames["queryPath"] = struct{}{}
+	}
 	if cfg.MCPProtocolVersion != "" && o.KotlinDir != "" {
 		nativeNames["serverDiscover"] = struct{}{}
 		nativeNames["serverInstructions"] = struct{}{}
@@ -59,14 +63,15 @@ func (o *outputPaths) validate[C ~string](cfg *apispec.Config[C]) error {
 		if err := o.validateRoute(route); err != nil {
 			return fmt.Errorf("routes[%d] (%q): %w", i, route.Name, err)
 		}
-		if o.TypeScriptDir != "" && route.QueryFromReq {
+		if route.Query != nil {
 			docs := docRegistry[C]{cfg: cfg}
-			if _, err := routeQueryFields(&docs, route); err != nil {
+			fields, err := routeQueryFields(&docs, route)
+			if err == nil {
+				err = o.validateQueryFields(cfg, fields)
+			}
+			if err != nil {
 				return fmt.Errorf("routes[%d] (%q): %w", i, route.Name, err)
 			}
-		}
-		if route.QueryFromReq && (o.KotlinDir != "" || o.SwiftDir != "") {
-			return fmt.Errorf("routes[%d] (%q): QueryFromReq is supported only by TypeScript output", i, route.Name)
 		}
 		// Scoped TypeScript factories have independent method namespaces.
 		namespace := ""
@@ -103,6 +108,29 @@ func (o *outputPaths) validate[C ~string](cfg *apispec.Config[C]) error {
 	return nil
 }
 
+func (o *outputPaths) validateQueryFields[C ~string](cfg *apispec.Config[C], fields []queryField) error {
+	for _, f := range fields {
+		t := f.field.Type
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if m := lookupSpecial(cfg, t); m != nil {
+			if o.TypeScriptDir != "" && !slices.Contains([]string{"boolean", "number", "string"}, m.TSType) ||
+				o.KotlinDir != "" && !slices.Contains([]string{"Boolean", "Double", "Float", "Int", "Long", "String"}, m.KTType) ||
+				o.SwiftDir != "" && !slices.Contains([]string{"Bool", "Double", "Float", "Int", "String"}, m.SwiftType) {
+				return fmt.Errorf("query field %q must map to a scalar in each selected language", f.name)
+			}
+			continue
+		}
+		switch t.Kind() {
+		case reflect.Bool, reflect.String, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Float32, reflect.Float64:
+		default:
+			return fmt.Errorf("query field %q has nonscalar type %s", f.name, t)
+		}
+	}
+	return nil
+}
+
 func (o *outputPaths) validateRoute(route *apispec.Route) error {
 	parameters := map[string]struct{}{}
 	for _, name := range extractPathParams(route.Path) {
@@ -112,6 +140,15 @@ func (o *outputPaths) validateRoute(route *apispec.Route) error {
 		parameters[name] = struct{}{}
 	}
 	reserved := []string{}
+	if route.Query != nil {
+		reserved = append(reserved, "query")
+		if o.TypeScriptDir != "" {
+			reserved = append(reserved, "search")
+		}
+		if o.SwiftDir != "" && route.IsSSE {
+			reserved = append(reserved, "queryURL")
+		}
+	}
 	if route.Req != nil {
 		reserved = append(reserved, "req")
 	}

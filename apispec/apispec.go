@@ -4,7 +4,6 @@ package apispec
 import (
 	"errors"
 	"fmt"
-	"go/token"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -122,10 +121,12 @@ type Route struct {
 	IsSSE       bool
 	SSEEvents   []SSEEvent
 	QueryParams []string
-	// QueryFromReq maps TypeScript JSON request fields to query parameters.
-	// Native outputs do not support this mode.
-	QueryFromReq bool
-	HeadersArg   bool
+	// Query is a named struct whose query-tagged fields supply URL parameters.
+	// It is independent of the JSON request body and cannot be combined with QueryParams.
+	// Values use their scalar wire representation; absent optional fields are omitted.
+	// Query tags on fields hidden from JSON are invalid.
+	Query      reflect.Type
+	HeadersArg bool
 }
 
 // Validate checks the route's metadata independently of any selected output.
@@ -148,8 +149,6 @@ func (r *Route) Validate() error {
 	}
 	if r.IsSSE {
 		switch {
-		case r.QueryFromReq:
-			return errors.New("SSE routes do not support request-derived queries")
 		case r.Req != nil:
 			return errors.New("SSE routes do not support request types")
 		case r.IsArray:
@@ -169,8 +168,16 @@ func (r *Route) Validate() error {
 			return err
 		}
 	}
-	if r.QueryFromReq && (r.Req == nil || r.Req.Kind() != reflect.Struct) {
-		return errors.New("query request must be a struct")
+	if r.Query != nil {
+		if err := validateNamedType("query", r.Query); err != nil {
+			return err
+		}
+		if r.Query.Kind() != reflect.Struct {
+			return errors.New("query type must be a struct")
+		}
+		if len(r.QueryParams) != 0 {
+			return errors.New("typed query cannot be combined with QueryParams")
+		}
 	}
 	parameters := map[string]struct{}{}
 	for _, name := range extractPathParams(r.Path) {
@@ -235,6 +242,9 @@ func validateNamedType(label string, t reflect.Type) error {
 	if t.Name() == "" {
 		return fmt.Errorf("%s type %s must be named", label, t)
 	}
+	if !isIdentifier(t.Name()) {
+		return fmt.Errorf("%s type %s must have an ASCII identifier name", label, t)
+	}
 	return nil
 }
 
@@ -259,11 +269,12 @@ func validatePath(path string) error {
 	return nil
 }
 
+var identifierRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 var pathParamRe = regexp.MustCompile(`\{(\w+)\}`)
 
 func isIdentifier(name string) bool {
-	// SDK identifiers may use Go keywords, such as a JSON field named "type".
-	return token.IsIdentifier(name) || token.Lookup(name).IsKeyword()
+	return identifierRe.MatchString(name)
 }
 
 func extractPathParams(path string) []string {

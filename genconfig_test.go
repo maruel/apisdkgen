@@ -219,6 +219,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 			codes        []apispec.ErrorCodeSpec[testGeneratedErrorCode]
 			want         string
 		}{
+			{"nonASCII symbol", "TypeScript", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "AÉ", Status: 400}}, `version v1: invalid SDK types: invalid TypeScript value name "testGeneratedErrorCodeAé"`},
 			{"Kotlin catchall", "Kotlin", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "OTHER", Status: 400}}, "version v1: invalid SDK types: generated Kotlin enum member \"testGeneratedErrorCode.Other\" conflicts with a generated declaration"},
 			{"TypeScript constant name", "TypeScript", []apispec.ErrorCodeSpec[testGeneratedErrorCode]{{Code: "A_B", Status: 400}, {Code: "A__B", Status: 401}}, "version v1: invalid SDK types: TypeScript value name \"testGeneratedErrorCodeAB\" is duplicated"},
 		} {
