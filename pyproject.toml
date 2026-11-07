@@ -1,3 +1,5 @@
+# Ruff configuration for repository Python scripts.
+
 [tool.ruff]
 target-version = "py312"
 line-length = 120
