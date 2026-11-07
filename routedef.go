@@ -109,6 +109,7 @@ func writeRouteTSSSEHandlers(r *apispec.Route, b *strings.Builder) {
 	}
 	fmt.Fprintf(b, "export interface %s {\n", routeTSSSEHandlersName(r))
 	fmt.Fprintf(b, "  onMessage: (event: %s) => void;\n", routeRespName(r))
+	b.WriteString("  // Decode and callback failures are reported here; the EventSource stays open.\n")
 	b.WriteString("  onError: (err: unknown) => void;\n")
 	for i := range r.SSEEvents {
 		e := &r.SSEEvents[i]
@@ -145,9 +146,13 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	for i := range r.SSEEvents {
 		e := &r.SSEEvents[i]
 		if e.Resp == nil {
-			fmt.Fprintf(b, "      if (handlers.%s) {\n", e.Handler)
-			fmt.Fprintf(b, "        es.addEventListener(%q, handlers.%s);\n", e.Name, e.Handler)
-			b.WriteString("      }\n")
+			fmt.Fprintf(b, "      es.addEventListener(%q, () => {\n", e.Name)
+			b.WriteString("        try {\n")
+			fmt.Fprintf(b, "          handlers.%s?.();\n", e.Handler)
+			b.WriteString("        } catch (err) {\n")
+			b.WriteString("          handlers.onError(err);\n")
+			b.WriteString("        }\n")
+			b.WriteString("      });\n")
 			continue
 		}
 		fmt.Fprintf(b, "      es.addEventListener(%q, (e) => {\n", e.Name)

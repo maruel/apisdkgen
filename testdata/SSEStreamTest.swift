@@ -4,6 +4,16 @@ import Foundation
 @main private struct SSEStreamTest {
     static func main() async throws {
         let client = ApiClient(baseURL: "https://example.test")
+        var ready = 0
+        var framed: [String] = []
+        for try await event in client.events(cursor: "framing", onReady: { ready += 1 }) {
+            framed.append(event.kind)
+        }
+        precondition(framed == ["bom", "雪", "last"] && ready == 1, "Frame boundaries must preserve dispatch")
+        var plain: [String] = []
+        for try await event in client.plainEvents(cursor: "plain") { plain.append(event.kind) }
+        precondition(plain == ["雪", "last"], "Plain streams frame multiline data and discard decode failures")
+        Transport.requests.removeAll()
         var controls: [String] = []
         var iterator = client.eventsReconnecting(cursor: "normal",
             onCheckpoint: { controls.append("checkpoint:\($0.cursor)") },

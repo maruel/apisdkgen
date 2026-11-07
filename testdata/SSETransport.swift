@@ -33,13 +33,22 @@ extension URLSession {
             }
         }
         func makeAsyncIterator() -> Iterator { Iterator(content: content, idle: idle) }
-        var lines: AsyncStream<String> { AsyncStream { $0.finish() } }
     }
     func bytes(for request: URLRequest) async throws -> (AsyncBytes, URLResponse) {
         Transport.requests.append(request)
         let mode = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first!.value!
         let content: String
         switch mode {
+        case "framing":
+            content = "\u{FEFF}data:{\"kind\":\"bom\"}\r\n\r\n" +
+                ": comment\r\nevent: unknown\r\ndata: not JSON\r\n\r\n" +
+                "event: ready\rdata:\r\r" +
+                "event:\ndata:{\"kind\":\ndata:\"雪\"}\n\n" +
+                "data: {\"kind\":\"last\"}\r\n\r\n" +
+                "data: {\"kind\":\"incomplete\"}\n"
+        case "plain":
+            content = "data:{\"kind\":\ndata:\"雪\"}\r\n\r\n" +
+                "data: not JSON\n\n" + "data: {\"kind\":\"last\"}\n\n"
         case "large": content = "data: {\"kind\":\"large\",\"text\":\"" + String(repeating: "x", count: 9 * 1024 * 1024) + "\"}\n\n"
         case "escaped": content = "data: {\"kind\":\"large\",\"text\":\"" + String(repeating: "\\u003c", count: 2 * 1024 * 1024) + "\"}\n\n"
         case "oversized": content = String(repeating: "data: " + String(repeating: "x", count: 1024) + "\n", count: 5) + "\n"

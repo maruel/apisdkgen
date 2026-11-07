@@ -192,7 +192,56 @@ class ApiClient(
         throw SSETransportFailure(e)
     }
 
+    private data class SSEFrame(val type: String, val id: String?, val data: String?)
+
+    // Owns byte delimiters and frame accumulation; EOF discards any unfinished frame.
+    private class SSEFrameParser(private val maxBytes: Long?) {
+        private val lineBytes = okio.Buffer()
+        private val data = StringBuilder()
+        private var dataSize = 0L
+        private var eventType = "message"
+        private var eventID: String? = null
+        private var previousCR = false
+        private var firstLine = true
+
+        fun accept(byte: Int): SSEFrame? {
+            if (byte == 10 && previousCR) { previousCR = false; return null }
+            previousCR = byte == 13
+            if (byte != 10 && byte != 13) {
+                if (maxBytes != null && lineBytes.size >= maxBytes) throw java.io.IOException("SSE line too large")
+                lineBytes.writeByte(byte)
+                return null
+            }
+            var line = lineBytes.readUtf8()
+            if (firstLine) { line = line.removePrefix("\uFEFF"); firstLine = false }
+            if (line.isEmpty()) {
+                val frame = SSEFrame(eventType, eventID, if (data.isEmpty()) null else data.substring(0, data.length - 1))
+                eventType = "message"
+                eventID = null
+                data.setLength(0)
+                dataSize = 0
+                return frame
+            }
+            if (line.startsWith(":")) return null
+            val field = line.substringBefore(":")
+            val value = line.substringAfter(":", "").removePrefix(" ")
+            when (field) {
+                "event" -> eventType = value.ifEmpty { "message" }
+                "id" -> if (!value.contains('\u0000')) eventID = value
+                "data" -> {
+                    if (maxBytes != null) {
+                        dataSize += value.toByteArray(Charsets.UTF_8).size + if (data.isEmpty()) 0 else 1
+                        if (dataSize > maxBytes) throw java.io.IOException("SSE frame too large")
+                    }
+                    data.append(value).append('\n')
+                }
+            }
+            return null
+        }
+    }
+
     // Named streams own framing because EventSource normalizes empty IDs to null.
+    // Decode and callback failures terminate collection; unknown event types are ignored.
     // One frame is materialized at a time; flow backpressure bounds queued events, not event size.
     private fun <T> namedSSEFlow(
         path: String,
@@ -212,47 +261,14 @@ class ApiClient(
                 sseIO { call.execute() }.use { response ->
                     if (!response.isSuccessful) throw java.io.IOException("SSE connection failed: HTTP ${response.code}")
                     val source = response.body?.source() ?: throw java.io.IOException("Missing SSE body")
-                    val lineBytes = okio.Buffer()
-                    val data = StringBuilder()
-                    var dataSize = 0L
-                    var eventType = "message"
-                    var eventID: String? = null
-                    var previousCR = false
+                    val parser = SSEFrameParser(maxSSEEventBytes)
                     while (!sseIO { source.exhausted() }) {
-                        val byte = sseIO { source.readByte() }.toInt() and 255
-                        if (byte == 10 && previousCR) { previousCR = false; continue }
-                        previousCR = byte == 13
-                        if (byte != 10 && byte != 13) {
-                            if (maxSSEEventBytes != null && lineBytes.size >= maxSSEEventBytes) throw java.io.IOException("SSE line too large")
-                            lineBytes.writeByte(byte)
-                            continue
-                        }
-                        val line = lineBytes.readUtf8()
-                        if (line.isEmpty()) {
-                            eventID?.let { onEventID?.invoke(it) }
-                            if (data.isNotEmpty()) {
-                                val event = decode(eventType, data.substring(0, data.length - 1))
-                                if (event != null) send(event)
-                            }
-                            eventType = "message"
-                            eventID = null
-                            data.setLength(0)
-                            dataSize = 0
-                            continue
-                        }
-                        if (line.startsWith(":")) continue
-                        val field = line.substringBefore(":")
-                        val value = line.substringAfter(":", "").removePrefix(" ")
-                        when (field) {
-                            "event" -> eventType = value.ifEmpty { "message" }
-                            "id" -> if (!value.contains('\u0000')) eventID = value
-                            "data" -> {
-                                if (maxSSEEventBytes != null) {
-                                    dataSize += value.toByteArray(Charsets.UTF_8).size + if (data.isEmpty()) 0 else 1
-                                    if (dataSize > maxSSEEventBytes) throw java.io.IOException("SSE frame too large")
-                                }
-                                data.append(value).append('\n')
-                            }
+                        val frame = parser.accept(sseIO { source.readByte() }.toInt() and 255) ?: continue
+                        // Cursor observation precedes dispatch; unknown types are ignored by decode.
+                        frame.id?.let { onEventID?.invoke(it) }
+                        frame.data?.let { data ->
+                            val event = decode(frame.type, data)
+                            if (event != null) send(event)
                         }
                     }
                 }

@@ -4,6 +4,7 @@ import { validatetestSDKEvent, validatetestSSEError } from "./validate.gen";
 
 export interface EventsHandlers {
   onMessage: (event: testSDKEvent) => void;
+  // Decode and callback failures are reported here; the EventSource stays open.
   onError: (err: unknown) => void;
   onReady?: () => void;
   onReset?: () => void;
@@ -12,6 +13,7 @@ export interface EventsHandlers {
 
 export interface RawEventsHandlers {
   onMessage: (event: testSDKEvent) => void;
+  // Decode and callback failures are reported here; the EventSource stays open.
   onError: (err: unknown) => void;
 }
 
@@ -57,12 +59,20 @@ export function createApiClient(fetchFn: FetchFn = (globalThis as any).fetch.bin
           handlers.onError(err);
         }
       });
-      if (handlers.onReady) {
-        es.addEventListener("ready", handlers.onReady);
-      }
-      if (handlers.onReset) {
-        es.addEventListener("reset", handlers.onReset);
-      }
+      es.addEventListener("ready", () => {
+        try {
+          handlers.onReady?.();
+        } catch (err) {
+          handlers.onError(err);
+        }
+      });
+      es.addEventListener("reset", () => {
+        try {
+          handlers.onReset?.();
+        } catch (err) {
+          handlers.onError(err);
+        }
+      });
       es.addEventListener("error", (e) => {
         if (!(e instanceof MessageEvent) || typeof e.data !== "string") return;
         try {

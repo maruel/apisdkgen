@@ -19,6 +19,21 @@ fun main() = runBlocking {
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
     server.createContext("/events") { exchange ->
         val mode = exchange.requestURI.rawQuery
+        if (mode == "cursor=framing") {
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, 0)
+            val content = "\uFEFFdata:{\"kind\":\"bom\"}\r\n\r\n" +
+                ": comment\r\nevent: unknown\r\ndata: not JSON\r\n\r\n" +
+                "event: ready\rdata:\r\r" +
+                "event:\ndata:{\"kind\":\ndata:\"雪\"}\n\n" +
+                "data: {\"kind\":\"last\"}\r\n\r\n" +
+                "data: {\"kind\":\"incomplete\"}\n"
+            exchange.responseBody.use { out ->
+                for (byte in content.toByteArray()) { out.write(byte.toInt()); out.flush() }
+            }
+            exchange.close()
+            return@createContext
+        }
         if (mode == "cursor=large" || mode == "cursor=escaped") {
             exchange.responseHeaders.add("Content-Type", "text/event-stream")
             exchange.sendResponseHeaders(200, 0)
@@ -80,6 +95,9 @@ fun main() = runBlocking {
     server.start()
     try {
         val client = ApiClient("http://127.0.0.1:${server.address.port}")
+        var ready = 0
+        val framed = withTimeout(3000) { client.events("framing", onReady = { ready++ }).toList() }
+        check(framed.map { it.kind } == listOf("bom", "雪", "last") && ready == 1) { "Frame boundaries lost dispatch: $framed" }
         val messages = withTimeout(10000) {
             client.eventsReconnecting("a +&=#%雪",
                 onCheckpoint = { controls.add("checkpoint:${it.cursor}") },

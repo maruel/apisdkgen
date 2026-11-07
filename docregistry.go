@@ -373,7 +373,56 @@ class ApiClient(
         throw SSETransportFailure(e)
     }
 
+    private data class SSEFrame(val type: String, val id: String?, val data: String?)
+
+    // Owns byte delimiters and frame accumulation; EOF discards any unfinished frame.
+    private class SSEFrameParser(private val maxBytes: Long?) {
+        private val lineBytes = okio.Buffer()
+        private val data = StringBuilder()
+        private var dataSize = 0L
+        private var eventType = "message"
+        private var eventID: String? = null
+        private var previousCR = false
+        private var firstLine = true
+
+        fun accept(byte: Int): SSEFrame? {
+            if (byte == 10 && previousCR) { previousCR = false; return null }
+            previousCR = byte == 13
+            if (byte != 10 && byte != 13) {
+                if (maxBytes != null && lineBytes.size >= maxBytes) throw java.io.IOException("SSE line too large")
+                lineBytes.writeByte(byte)
+                return null
+            }
+            var line = lineBytes.readUtf8()
+            if (firstLine) { line = line.removePrefix("\uFEFF"); firstLine = false }
+            if (line.isEmpty()) {
+                val frame = SSEFrame(eventType, eventID, if (data.isEmpty()) null else data.substring(0, data.length - 1))
+                eventType = "message"
+                eventID = null
+                data.setLength(0)
+                dataSize = 0
+                return frame
+            }
+            if (line.startsWith(":")) return null
+            val field = line.substringBefore(":")
+            val value = line.substringAfter(":", "").removePrefix(" ")
+            when (field) {
+                "event" -> eventType = value.ifEmpty { "message" }
+                "id" -> if (!value.contains('\u0000')) eventID = value
+                "data" -> {
+                    if (maxBytes != null) {
+                        dataSize += value.toByteArray(Charsets.UTF_8).size + if (data.isEmpty()) 0 else 1
+                        if (dataSize > maxBytes) throw java.io.IOException("SSE frame too large")
+                    }
+                    data.append(value).append('\n')
+                }
+            }
+            return null
+        }
+    }
+
     // Named streams own framing because EventSource normalizes empty IDs to null.
+    // Decode and callback failures terminate collection; unknown event types are ignored.
     // One frame is materialized at a time; flow backpressure bounds queued events, not event size.
     private fun <T> namedSSEFlow(
         path: String,
@@ -393,47 +442,14 @@ class ApiClient(
                 sseIO { call.execute() }.use { response ->
                     if (!response.isSuccessful) throw java.io.IOException("SSE connection failed: HTTP ${response.code}")
                     val source = response.body?.source() ?: throw java.io.IOException("Missing SSE body")
-                    val lineBytes = okio.Buffer()
-                    val data = StringBuilder()
-                    var dataSize = 0L
-                    var eventType = "message"
-                    var eventID: String? = null
-                    var previousCR = false
+                    val parser = SSEFrameParser(maxSSEEventBytes)
                     while (!sseIO { source.exhausted() }) {
-                        val byte = sseIO { source.readByte() }.toInt() and 255
-                        if (byte == 10 && previousCR) { previousCR = false; continue }
-                        previousCR = byte == 13
-                        if (byte != 10 && byte != 13) {
-                            if (maxSSEEventBytes != null && lineBytes.size >= maxSSEEventBytes) throw java.io.IOException("SSE line too large")
-                            lineBytes.writeByte(byte)
-                            continue
-                        }
-                        val line = lineBytes.readUtf8()
-                        if (line.isEmpty()) {
-                            eventID?.let { onEventID?.invoke(it) }
-                            if (data.isNotEmpty()) {
-                                val event = decode(eventType, data.substring(0, data.length - 1))
-                                if (event != null) send(event)
-                            }
-                            eventType = "message"
-                            eventID = null
-                            data.setLength(0)
-                            dataSize = 0
-                            continue
-                        }
-                        if (line.startsWith(":")) continue
-                        val field = line.substringBefore(":")
-                        val value = line.substringAfter(":", "").removePrefix(" ")
-                        when (field) {
-                            "event" -> eventType = value.ifEmpty { "message" }
-                            "id" -> if (!value.contains('\u0000')) eventID = value
-                            "data" -> {
-                                if (maxSSEEventBytes != null) {
-                                    dataSize += value.toByteArray(Charsets.UTF_8).size + if (data.isEmpty()) 0 else 1
-                                    if (dataSize > maxSSEEventBytes) throw java.io.IOException("SSE frame too large")
-                                }
-                                data.append(value).append('\n')
-                            }
+                        val frame = parser.accept(sseIO { source.readByte() }.toInt() and 255) ?: continue
+                        // Cursor observation precedes dispatch; unknown types are ignored by decode.
+                        frame.id?.let { onEventID?.invoke(it) }
+                        frame.data?.let { data ->
+                            val event = decode(frame.type, data)
+                            if (event != null) send(event)
                         }
                     }
                 }
@@ -538,13 +554,75 @@ private final class SSETaskOwner {
     deinit { cancel() }
 }
 
+private struct SSEFrame {
+    let type: String
+    let id: String?
+    let data: Data?
+}
+
+// Owns delimiters across pulls and frame accumulation; EOF discards unfinished frames.
+private struct SSEFrameParser {
+    let maxBytes: Int?
+    private var eventType = "message"
+    private var eventID: String?
+    private var dataLines: [String] = []
+    private var dataSize = 0
+    private var lineBytes: [UInt8] = []
+    private var previousCR = false
+    private var firstLine = true
+
+    init(maxBytes: Int?) { self.maxBytes = maxBytes }
+
+    mutating func accept(_ byte: UInt8) throws -> SSEFrame? {
+        if byte == 10 && previousCR { previousCR = false; return nil }
+        previousCR = byte == 13
+        if byte != 10 && byte != 13 {
+            if let limit = maxBytes, lineBytes.count >= limit { throw URLError(.dataLengthExceedsMaximum) }
+            lineBytes.append(byte)
+            return nil
+        }
+        var line = String(decoding: lineBytes, as: UTF8.self)
+        lineBytes.removeAll(keepingCapacity: true)
+        if firstLine {
+            if line.hasPrefix("\u{FEFF}") { line.removeFirst() }
+            firstLine = false
+        }
+        if line.isEmpty {
+            let frame = SSEFrame(type: eventType, id: eventID,
+                data: dataLines.isEmpty ? nil : Data(dataLines.joined(separator: "\n").utf8))
+            eventType = "message"
+            eventID = nil
+            dataLines.removeAll(keepingCapacity: true)
+            dataSize = 0
+            return frame
+        }
+        if line.hasPrefix(":") { return nil }
+        let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        let field = parts[0]
+        var value = parts.count > 1 ? String(parts[1]) : ""
+        if value.hasPrefix(" ") { value.removeFirst() }
+        switch field {
+        case "event": eventType = value.isEmpty ? "message" : value
+        case "id": if !value.contains("\0") { eventID = value }
+        case "data":
+            if let limit = maxBytes {
+                dataSize += value.utf8.count + (dataLines.isEmpty ? 0 : 1)
+                if dataSize > limit { throw URLError(.dataLengthExceedsMaximum) }
+            }
+            dataLines.append(value)
+        default: break
+        }
+        return nil
+    }
+}
+
 // Pull one message at a time: no producer task or decoded-event queue.
 // Memory is proportional to one materialized event; only an explicit size limit rejects large events.
 private final class SSEFrameReader<T> {
     private let open: () async throws -> URLSession.AsyncBytes
     private let decode: (String, Data) throws -> T?
     private let onEventID: ((String) -> Void)?
-    private let maxSSEEventBytes: Int?
+    private var parser: SSEFrameParser
     private let owner = SSETaskOwner()
     private var iterator: URLSession.AsyncBytes.Iterator?
     private var finished = false
@@ -552,7 +630,7 @@ private final class SSEFrameReader<T> {
          onEventID: ((String) -> Void)?, maxSSEEventBytes: Int?, decode: @escaping (String, Data) throws -> T?) {
         self.open = open
         self.onEventID = onEventID
-        self.maxSSEEventBytes = maxSSEEventBytes
+        self.parser = SSEFrameParser(maxBytes: maxSSEEventBytes)
         self.decode = decode
     }
     deinit { owner.cancel() }
@@ -571,12 +649,6 @@ private final class SSEFrameReader<T> {
             owner.install(bytes.task)
             iterator = bytes.makeAsyncIterator()
         }
-        var eventType = "message"
-        var eventID: String?
-        var dataLines: [String] = []
-        var dataSize = 0
-        var lineBytes: [UInt8] = []
-        var previousCR = false
         while true {
             try _Concurrency.Task.checkCancellation()
             let nextByte: UInt8?
@@ -591,42 +663,10 @@ private final class SSEFrameReader<T> {
                 owner.cancel()
                 return nil
             }
-            if byte == 10 && previousCR { previousCR = false; continue }
-            previousCR = byte == 13
-            if byte != 10 && byte != 13 {
-                if let limit = maxSSEEventBytes, lineBytes.count >= limit { throw URLError(.dataLengthExceedsMaximum) }
-                lineBytes.append(byte)
-                continue
-            }
-            let line = String(decoding: lineBytes, as: UTF8.self)
-            lineBytes.removeAll(keepingCapacity: true)
-            if line.isEmpty {
-                if let eventID { onEventID?(eventID) }
-                let type = eventType
-                let data = dataLines.isEmpty ? nil : Data(dataLines.joined(separator: "\n").utf8)
-                eventType = "message"
-                eventID = nil
-                dataLines.removeAll(keepingCapacity: true)
-                dataSize = 0
-                if let data, let event = try decode(type, data) { return event }
-                continue
-            }
-            if line.hasPrefix(":") { continue }
-            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            let field = parts[0]
-            var value = parts.count > 1 ? String(parts[1]) : ""
-            if value.hasPrefix(" ") { value.removeFirst() }
-            switch field {
-            case "event": eventType = value.isEmpty ? "message" : value
-            case "id": if !value.contains("\0") { eventID = value }
-            case "data":
-                if let limit = maxSSEEventBytes {
-                    dataSize += value.utf8.count + (dataLines.isEmpty ? 0 : 1)
-                    if dataSize > limit { throw URLError(.dataLengthExceedsMaximum) }
-                }
-                dataLines.append(value)
-            default: break
-            }
+            guard let frame = try parser.accept(byte) else { continue }
+            // Cursor observation precedes dispatch; unknown types are ignored by decode.
+            if let id = frame.id { onEventID?(id) }
+            if let data = frame.data, let event = try decode(frame.type, data) { return event }
         }
     }
 }
@@ -734,6 +774,7 @@ public final class ApiClient {
         path: String, lastEventID: String?, onEventID: ((String) -> Void)?,
         decode: @escaping (String, Data) throws -> T?
     ) -> AsyncThrowingStream<T, Error> {
+        // Decode and callback failures terminate iteration; unknown event types are ignored.
         let reader = SSEFrameReader(open: {
             var req = URLRequest(url: URL(string: self.baseURL + path)!)
             req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -760,40 +801,29 @@ public final class ApiClient {
         return AsyncThrowingStream(unfolding: { try await reader.next() })
     }
 
+    // Plain streams accept all event types and discard payload decode failures.
+    // Framing and pull-based delivery are shared with named streams.
     private func sseStream<T: Decodable>(path: String) -> AsyncThrowingStream<T, Error> {
-        AsyncThrowingStream { continuation in
-            let task = _Concurrency.Task {
-                do {
-                    var req = URLRequest(url: URL(string: self.baseURL + path)!)
-                    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                    if let token = self.tokenProvider?() {
-                        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                    }
-                    let (bytes, response) = try await self.urlSession.bytes(for: req)
-                    if let httpResponse = response as? HTTPURLResponse,
-                       !(200..<300).contains(httpResponse.statusCode) {
-                        continuation.finish(throwing: ApiError(
-`)
-	fmt.Fprintf(&b, "                            statusCode: httpResponse.statusCode, code: %s,\n", d.swiftUnknownErrorCode("HTTP_ERROR"))
-	b.WriteString(`                            message: "SSE connection failed with status \(httpResponse.statusCode)",
-                            details: nil))
-                        return
-                    }
-                    for try await line in bytes.lines {
-                        if _Concurrency.Task.isCancelled { break }
-                        guard line.hasPrefix("data: ") else { continue }
-                        let data = Data(line.dropFirst(6).utf8)
-                        if let event = try? self.decoder.decode(T.self, from: data) {
-                            continuation.yield(event)
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
+        let reader = SSEFrameReader<T>(open: {
+            var req = URLRequest(url: URL(string: self.baseURL + path)!)
+            req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            if let token = self.tokenProvider?() {
+                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
-            continuation.onTermination = { _ in task.cancel() }
-        }
+            let (bytes, response) = try await self.urlSession.bytes(for: req)
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200..<300).contains(httpResponse.statusCode) {
+                bytes.task.cancel()
+                throw ApiError(
+`)
+	fmt.Fprintf(&b, "                    statusCode: httpResponse.statusCode, code: %s,\n", d.swiftUnknownErrorCode("HTTP_ERROR"))
+	b.WriteString(`                    message: "SSE connection failed with status \(httpResponse.statusCode)", details: nil)
+            }
+            return bytes
+        }, onEventID: nil, maxSSEEventBytes: nil, decode: { _, data in
+            try? self.decoder.decode(T.self, from: data)
+        })
+        return AsyncThrowingStream(unfolding: { try await reader.next() })
     }
 
     private func reconnectingStream<T>(_ connect: @escaping () -> AsyncThrowingStream<T, Error>) -> AsyncThrowingStream<T, Error> {

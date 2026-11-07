@@ -872,6 +872,19 @@ source.dispatchEvent(new MessageEvent("failure", { data: JSON.stringify({message
 source.dispatchEvent(new MessageEvent("message", { data: "not JSON" }));
 check(messages === 1 && ready === 1 && failures === 1 && errors === 1);
 check(controls.join(",") === "checkpoint,message,stats,reset");
+const callbackFailure = new Error("callback failure");
+const callbackErrors: unknown[] = [];
+const callbacks = client.workspace(value).events(value, value, "", {
+  ...handlers,
+  onMessage: () => { throw callbackFailure; },
+  onCheckpoint: () => { throw callbackFailure; },
+  onReady: () => { throw callbackFailure; },
+  onError: (error: unknown) => { callbackErrors.push(error); },
+});
+callbacks.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({kind: "update"}) }));
+callbacks.dispatchEvent(new MessageEvent("checkpoint", { data: JSON.stringify({cursor: "next"}) }));
+callbacks.dispatchEvent(new Event("ready"));
+check(callbackErrors.length === 3 && callbackErrors.every(error => error === callbackFailure));
 check(new URL(client.rootEvents(value, handlers).url, "https://example.test").searchParams.get("cursor") === value);
 check(client.rootEvents("", handlers).url === "/events?cursor=");
 check(client.rawEvents(handlers).url === "/raw-events");
@@ -970,7 +983,7 @@ if (false) client.rawEvents("", handlers);
 				{Name: "reset", Handler: "onReset", Resp: reflect.TypeFor[testSSEReset]()},
 				{Name: "error", Handler: "onHistoryError", Resp: reflect.TypeFor[testSSEError]()},
 				{Name: "ready", Handler: "onReady"},
-			}}},
+			}}, {Name: "plainEvents", Path: "/events", Resp: eventType, IsSSE: true, QueryParams: []string{"cursor"}}},
 		}
 		api := NewAPI(".", OutputConfig{SwiftDir: dir}, cfg)
 		if err := api.Generate(); err != nil {
