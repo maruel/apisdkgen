@@ -120,7 +120,7 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 							reg.typeDoc[typeSpec.Name.Name] = doc
 						}
 					}
-				case *ast.ArrayType:
+				case *ast.ArrayType, *ast.MapType:
 					// Named slice type.
 					fn := filepath.Base(fset.Position(typeSpec.Pos()).Filename)
 					reg.typeFile[typeSpec.Name.Name] = fn

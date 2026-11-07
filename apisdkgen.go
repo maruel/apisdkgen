@@ -277,6 +277,10 @@ func generateAPI[C ~string](sourceDir string, output OutputConfig, config apispe
 		return fmt.Errorf("loading docs: %w", err)
 	}
 
+	if err := validateSDKTypes(&config, docs.aliases, output); err != nil {
+		return fmt.Errorf("invalid SDK types: %w", err)
+	}
+
 	if output.TypeScriptDir != "" {
 		if err := docs.generateTSTypes(output.TypeScriptDir, sink); err != nil {
 			return err

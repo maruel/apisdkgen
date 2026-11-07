@@ -3,6 +3,7 @@
 package apisdkgen
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"go/token"
@@ -104,8 +105,8 @@ func (d *docRegistry[C]) swiftUnknownErrorCode(value string) string {
 }
 
 // discoverSSEStructs returns structs reachable from SSE route responses and
-// named-event payloads in dependency order.
-func (d *docRegistry[C]) discoverSSEStructs() []sdkType {
+// named-event payloads in stable discovery order.
+func (d *docRegistry[C]) discoverSSEStructs() ([]sdkType, error) {
 	seeds := make([]reflect.Type, 0, len(d.cfg.Routes))
 	for i := range d.cfg.Routes {
 		r := &d.cfg.Routes[i]
@@ -119,24 +120,32 @@ func (d *docRegistry[C]) discoverSSEStructs() []sdkType {
 			}
 		}
 	}
-	order := walkSDKTypes(d.cfg, seeds)
+	order, err := walkSDKTypes(d.cfg, seeds)
+	if err != nil {
+		return nil, err
+	}
+	order = slices.DeleteFunc(order, func(t reflect.Type) bool { return t.Kind() != reflect.Struct })
 	result := make([]sdkType, len(order))
 	for i, t := range order {
 		result[i] = sdkType{Type: t}
 	}
-	return result
+	return result, nil
 }
 
 // discoverKotlinStructs walks the API struct types reachable from route
-// types and returns them in dependency order (leaves first).
-func (d *docRegistry[C]) discoverKotlinStructs() []sdkType {
+// types and returns them in stable discovery order.
+func (d *docRegistry[C]) discoverKotlinStructs() ([]sdkType, error) {
 	seeds := sdkSeedTypes(d.cfg)
-	order := walkSDKTypes(d.cfg, seeds)
+	order, err := walkSDKTypes(d.cfg, seeds)
+	if err != nil {
+		return nil, err
+	}
+	order = slices.DeleteFunc(order, func(t reflect.Type) bool { return t.Kind() != reflect.Struct })
 	result := make([]sdkType, len(order))
 	for i, t := range order {
 		result[i] = sdkType{Type: t, comment: d.cfg.SectionComments[t.Name()]}
 	}
-	return result
+	return result, nil
 }
 
 func (d *docRegistry[C]) writeKotlinClient(outDir string, out outputSink) error {
@@ -513,15 +522,19 @@ class ApiClient(
 }
 
 // discoverSwiftStructs walks the API struct types reachable from route types
-// and returns them in dependency order, annotated with Swift section comments.
-func (d *docRegistry[C]) discoverSwiftStructs() []sdkType {
+// and returns them in stable discovery order, annotated with Swift section comments.
+func (d *docRegistry[C]) discoverSwiftStructs() ([]sdkType, error) {
 	seeds := sdkSeedTypes(d.cfg)
-	order := walkSDKTypes(d.cfg, seeds)
+	order, err := walkSDKTypes(d.cfg, seeds)
+	if err != nil {
+		return nil, err
+	}
+	order = slices.DeleteFunc(order, func(t reflect.Type) bool { return t.Kind() != reflect.Struct })
 	result := make([]sdkType, len(order))
 	for i, t := range order {
 		result[i] = sdkType{Type: t, comment: d.cfg.SectionComments[t.Name()]}
 	}
-	return result
+	return result, nil
 }
 
 func (d *docRegistry[C]) writeSwiftClient(outDir string, out outputSink) error {
@@ -936,14 +949,18 @@ public final class ApiClient {
 
 // discoverTSStructs walks route types and ErrorResponse, and annotates
 // each struct with its source file for section grouping.
-func (d *docRegistry[C]) discoverTSStructs() []sdkType {
+func (d *docRegistry[C]) discoverTSStructs() ([]sdkType, error) {
 	seeds := sdkSeedTypes(d.cfg)
-	order := walkSDKTypes(d.cfg, seeds)
+	order, err := walkSDKTypes(d.cfg, seeds)
+	if err != nil {
+		return nil, err
+	}
+	order = slices.DeleteFunc(order, func(t reflect.Type) bool { return t.Kind() != reflect.Struct })
 	result := make([]sdkType, len(order))
 	for i, t := range order {
 		result[i] = sdkType{Type: t, comment: d.typeFile[t.Name()]}
 	}
-	return result
+	return result, nil
 }
 
 // goTypeToTS maps a Go reflect.Type to its TypeScript type string.
@@ -991,6 +1008,9 @@ func (d *docRegistry[C]) goTypeToTS(t reflect.Type) (string, error) {
 		}
 		return e + "[]", nil
 	case reflect.Map:
+		if isSDKPkg(d.cfg, t.PkgPath()) {
+			return t.Name(), nil
+		}
 		k, err := d.goTypeToTS(t.Key())
 		if err != nil {
 			return "", err
@@ -1014,7 +1034,7 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 	}
 	name := t.Name()
 	fmt.Fprintf(b, "export interface %s {\n", name)
-	fields, err := d.jsonFields(t)
+	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return err
 	}
@@ -1066,24 +1086,17 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out outputSink) error {
 	b.WriteString("/** ISO 8601 timestamp string (e.g. \"2026-04-13T12:00:00Z\"). */\n")
 	b.WriteString("export type ISOTimestamp = string & { readonly __brand: \"ISOTimestamp\" };\n")
 
-	allStructs := d.discoverTSStructs()
-
-	// Group structs by source file for section headers.
-	structsBySource := map[string][]sdkType{}
-	for _, ks := range allStructs {
-		src := ks.comment
-		if src == "" {
-			src = "types.go"
-		}
-		structsBySource[src] = append(structsBySource[src], ks)
+	allStructs, err := d.discoverTSStructs()
+	if err != nil {
+		return err
 	}
 
-	// We use the order from allStructs (walk order, leaves-first within each
-	// source file group) and filter for the current source file.
-	seen := map[string]struct{}{}
+	// Names have already been checked at preparation. Discovery provides each
+	// declaration once, so section placement is a schedule, not emission state.
+	hasEvents := slices.ContainsFunc(allStructs, func(t sdkType) bool { return t.comment == "events.go" })
 
 	// Emit events.go section with its type aliases first.
-	if _, ok := structsBySource["events.go"]; ok {
+	if hasEvents {
 		b.WriteString("\n//////////\n")
 		b.WriteString("// source: events.go\n")
 		b.WriteString("/*\n")
@@ -1095,27 +1108,21 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out outputSink) error {
 			if a.file != "events.go" {
 				continue
 			}
-			if _, ok := seen[a.name]; ok {
-				continue
-			}
 			b.WriteString("\n")
 			emitTSAlias(&b, *a, a.name == d.errorCodeTypeName())
-			seen[a.name] = struct{}{}
 		}
 
 		// Then structs in walk order, filtered to events.go.
 		for _, ks := range allStructs {
 			name := ks.Type.Name()
-			if _, ok := seen[name]; ok || ks.comment != "events.go" {
+			if ks.comment != "events.go" {
 				continue
 			}
-			seen[name] = struct{}{}
 			b.WriteString("\n")
 			if err := d.emitTSStruct(&b, ks.Type); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
 		}
-		delete(structsBySource, "events.go")
 	}
 
 	// Emit types.go section.
@@ -1124,40 +1131,45 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out outputSink) error {
 
 	// Type aliases from types.go (all non-events aliases).
 	for _, a := range d.aliases {
-		if _, ok := seen[a.name]; ok {
+		if hasEvents && a.file == "events.go" {
 			continue
 		}
 		b.WriteString("\n")
 		emitTSAlias(&b, a, a.name == d.errorCodeTypeName())
-		seen[a.name] = struct{}{}
 	}
 
-	// Named slice types used as fields in discovered structs.
-	namedSlices := collectNamedSlices(d.cfg, allStructs)
+	// Named container declarations in graph order.
+	namedSlices, err := collectNamedContainers(d.cfg)
+	if err != nil {
+		return err
+	}
 	for _, ns := range namedSlices {
 		name := ns.Name()
-		if _, ok := seen[name]; ok {
-			continue
-		}
 		b.WriteString("\n")
 		if doc := d.typeDoc[name]; doc != "" {
 			b.WriteString(formatBlockDoc(doc, ""))
 		}
-		elemType, err := goTypeToDoc(d.cfg, ns.Elem())
+		elemType, err := d.goTypeToTS(ns.Elem())
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
-		fmt.Fprintf(&b, "export type %s = %s[];\n", name, elemType)
-		seen[name] = struct{}{}
+		if ns.Kind() == reflect.Map {
+			key, err := d.goTypeToTS(ns.Key())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "export type %s = { [key: %s]: %s };\n", name, key, elemType)
+		} else {
+			fmt.Fprintf(&b, "export type %s = %s[];\n", name, elemType)
+		}
 	}
 
-	// Structs from types.go (and any ungrouped) in walk order.
+	// Structs from types.go (and any ungrouped) in discovery order.
 	for _, ks := range allStructs {
 		name := ks.Type.Name()
-		if _, ok := seen[name]; ok {
+		if hasEvents && ks.comment == "events.go" {
 			continue
 		}
-		seen[name] = struct{}{}
 		b.WriteString("\n")
 		if err := d.emitTSStruct(&b, ks.Type); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
@@ -1238,7 +1250,7 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 	// Read discriminator values from the same enum metadata emitted in the SDK.
 	var kindExpr string
 	var kinds []string
-	fields, err := d.jsonFields(t)
+	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return err
 	}
@@ -1326,7 +1338,7 @@ func (d *docRegistry[C]) emitTSValidator(b *strings.Builder, t reflect.Type) err
 	fmt.Fprintf(b, "  const obj = asObject(raw, %q);\n", name)
 	fmt.Fprintf(b, "  return {\n")
 
-	fields, err := d.jsonFields(t)
+	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return err
 	}
@@ -1369,7 +1381,10 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out outputSink) error
 	// Collect all types referenced by validators. ISOTimestamp is the only
 	// type not discoverable from Go struct reflection (it's a TypeScript alias
 	// for time.Time).
-	needed := d.discoverSSEStructs()
+	needed, err := d.discoverSSEStructs()
+	if err != nil {
+		return err
+	}
 	if len(needed) == 0 {
 		if hasSSERoutes(d.cfg) {
 			return errors.New("SSE routes configured without reachable SSE DTO validators")
@@ -1387,11 +1402,12 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out outputSink) error
 	for _, ks := range needed {
 		refTypes[ks.Type.Name()] = struct{}{}
 		// Collect alias types used by struct fields (for union type casts).
-		for sf := range ks.Type.Fields() {
-			if !sf.IsExported() {
-				continue
-			}
-			ft := sf.Type
+		fields, err := jsonFields(d.cfg, ks.Type)
+		if err != nil {
+			return err
+		}
+		for _, field := range fields {
+			ft := field.field.Type
 			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
@@ -1466,22 +1482,16 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out outputSink) error
 	for _, n := range d.cfg.Discriminated {
 		discriminated[n] = struct{}{}
 	}
-	emitted := map[string]struct{}{}
 
 	for _, ks := range needed {
 		name := ks.Type.Name()
-		if _, ok := emitted[name]; ok {
-			continue
-		}
 		b.WriteString("\n")
 		if _, ok := discriminated[name]; ok {
 			if err := d.emitTSDiscriminator(&b, ks.Type); err != nil {
 				return fmt.Errorf("validate%s: %w", name, err)
 			}
-			emitted[name] = struct{}{}
 			continue
 		}
-		emitted[name] = struct{}{}
 		if err := d.emitTSValidator(&b, ks.Type); err != nil {
 			return fmt.Errorf("validate%s: %w", name, err)
 		}
@@ -1722,6 +1732,9 @@ func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
 		}
 		return "List<" + e + ">", nil
 	case reflect.Map:
+		if isSDKPkg(d.cfg, t.PkgPath()) {
+			return t.Name(), nil
+		}
 		k, err := d.goTypeToKotlin(t.Key())
 		if err != nil {
 			return "", err
@@ -1740,7 +1753,7 @@ func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
 
 // parseStructFields extracts kotlinField entries from a reflect.Type.
 func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error) {
-	selected, err := d.jsonFields(t)
+	selected, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return nil, err
 	}
@@ -1896,15 +1909,30 @@ func (d *docRegistry[C]) writeKotlinTypes(outDir string, out outputSink) error {
 	}
 
 	// Structs: auto-discovered from route types and their transitive fields.
-	kcStructs := d.discoverKotlinStructs()
+	kcStructs, err := d.discoverKotlinStructs()
+	if err != nil {
+		return err
+	}
 
-	// Named slice type aliases.
-	for _, ns := range collectNamedSlices(d.cfg, kcStructs) {
+	// Named container type aliases.
+	containers, err := collectNamedContainers(d.cfg)
+	if err != nil {
+		return err
+	}
+	for _, ns := range containers {
 		ktElem, err := d.goTypeToKotlin(ns.Elem())
 		if err != nil {
 			return fmt.Errorf("%s: %w", ns.Name(), err)
 		}
-		fmt.Fprintf(&b, "\ntypealias %s = List<%s>\n", ns.Name(), ktElem)
+		if ns.Kind() == reflect.Map {
+			key, err := d.goTypeToKotlin(ns.Key())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "\ntypealias %s = Map<%s, %s>\n", ns.Name(), key, ktElem)
+		} else {
+			fmt.Fprintf(&b, "\ntypealias %s = List<%s>\n", ns.Name(), ktElem)
+		}
 	}
 
 	for _, ks := range kcStructs {
@@ -1996,8 +2024,31 @@ func (d *docRegistry[C]) generateMarkdownDoc(outDir string, out outputSink) erro
 	if d.cfg.DocumentExtraSeeds {
 		seeds = sdkSeedTypes(d.cfg)
 	}
-	// Discover documented struct types in dependency order (leaves first).
-	for _, t := range walkSDKTypes(d.cfg, seeds) {
+	// Discover documented types in stable order, including cyclic references.
+	types, err := walkSDKTypes(d.cfg, seeds)
+	if err != nil {
+		return err
+	}
+	for _, t := range types {
+		if t.Kind() == reflect.Slice || t.Kind() == reflect.Map {
+			elem, err := goTypeToDoc(d.cfg, t.Elem())
+			if err != nil {
+				return err
+			}
+			typ := elem + "[]"
+			if t.Kind() == reflect.Map {
+				key, err := goTypeToDoc(d.cfg, t.Key())
+				if err != nil {
+					return err
+				}
+				typ = "Record<" + key + ", " + elem + ">"
+			}
+			fmt.Fprintf(&b, "\n### %s\n\n`type %s = %s`\n", t.Name(), t.Name(), typ)
+			continue
+		}
+		if t.Kind() != reflect.Struct {
+			continue
+		}
 		if err := d.writeDocType(&b, t); err != nil {
 			return err
 		}
@@ -2032,7 +2083,7 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 	}
 	b.WriteString("| Field | Type | Description | Required |\n")
 	b.WriteString("|-------|------|-------------|----------|\n")
-	fields, err := d.jsonFields(t)
+	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return err
 	}
@@ -2091,6 +2142,9 @@ func (d *docRegistry[C]) goTypeToSwift(t reflect.Type) (string, error) {
 		}
 		return "[" + e + "]", nil
 	case reflect.Map:
+		if isSDKPkg(d.cfg, t.PkgPath()) {
+			return t.Name(), nil
+		}
 		k, err := d.goTypeToSwift(t.Key())
 		if err != nil {
 			return "", err
@@ -2116,7 +2170,7 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 	fmt.Fprintf(b, "public struct %s: Codable {\n", name)
 	var codingKeys []string
 	needCodingKeys := false
-	fields, err := d.jsonFields(t)
+	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
 		return err
 	}
@@ -2236,10 +2290,17 @@ public enum JSONValue: Codable, Equatable {
 	}
 
 	// Structs.
-	swStructs := d.discoverSwiftStructs()
+	swStructs, err := d.discoverSwiftStructs()
+	if err != nil {
+		return err
+	}
 
-	// Named slice type aliases.
-	for _, ns := range collectNamedSlices(d.cfg, swStructs) {
+	// Named container type aliases.
+	containers, err := collectNamedContainers(d.cfg)
+	if err != nil {
+		return err
+	}
+	for _, ns := range containers {
 		b.WriteString("\n")
 		if doc := d.typeDoc[ns.Name()]; doc != "" {
 			b.WriteString(formatSwiftDoc(doc, ""))
@@ -2248,7 +2309,15 @@ public enum JSONValue: Codable, Equatable {
 		if err != nil {
 			return fmt.Errorf("%s: %w", ns.Name(), err)
 		}
-		fmt.Fprintf(&b, "public typealias %s = [%s]\n", ns.Name(), swElem)
+		if ns.Kind() == reflect.Map {
+			key, err := d.goTypeToSwift(ns.Key())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "public typealias %s = [%s: %s]\n", ns.Name(), key, swElem)
+		} else {
+			fmt.Fprintf(&b, "public typealias %s = [%s]\n", ns.Name(), swElem)
+		}
 	}
 
 	for _, ks := range swStructs {
@@ -2289,14 +2358,26 @@ type jsonFieldCandidate struct {
 
 type jsonFieldChoice struct {
 	index    int
-	depth    int
-	tagged   bool
 	conflict bool
+}
+
+// compareJSONFieldPriority orders candidates by encoding/json dominance.
+func compareJSONFieldPriority(a, b jsonFieldCandidate) int {
+	if n := cmp.Compare(a.depth, b.depth); n != 0 {
+		return n
+	}
+	if a.tagged == b.tagged {
+		return 0
+	}
+	if a.tagged {
+		return -1
+	}
+	return 1
 }
 
 // jsonFields applies encoding/json's embedded-field name precedence. Embedded
 // pointers are rejected because their promoted fields may all be absent.
-func (d *docRegistry[C]) jsonFields(t reflect.Type) ([]jsonField, error) {
+func jsonFields[C ~string](cfg *apispec.Config[C], t reflect.Type) ([]jsonField, error) {
 	var candidates []jsonFieldCandidate
 	seen := map[reflect.Type]struct{}{t: {}}
 	var walk func(reflect.Type, int) error
@@ -2315,7 +2396,7 @@ func (d *docRegistry[C]) jsonFields(t reflect.Type) ([]jsonField, error) {
 				if sf.Type.Kind() == reflect.Pointer {
 					return fmt.Errorf("%s.%s: embedded pointer fields may be absent from JSON; embed by value or give the field a JSON name", owner, sf.Name)
 				}
-				if !isSDKPkg(d.cfg, base.PkgPath()) {
+				if !isSDKPkg(cfg, base.PkgPath()) {
 					return fmt.Errorf("%s.%s: embedded struct package %q is not an SDK package; add it to SDKPackagePaths or give the field a JSON name", owner, sf.Name, base.PkgPath())
 				}
 				if _, ok := seen[base]; !ok {
@@ -2343,10 +2424,14 @@ func (d *docRegistry[C]) jsonFields(t reflect.Type) ([]jsonField, error) {
 	best := make(map[string]jsonFieldChoice, len(candidates))
 	for i, field := range candidates {
 		prior, ok := best[field.name]
-		switch {
-		case !ok, field.depth < prior.depth, field.depth == prior.depth && field.tagged && !prior.tagged:
-			best[field.name] = jsonFieldChoice{index: i, depth: field.depth, tagged: field.tagged}
-		case field.depth == prior.depth && field.tagged == prior.tagged:
+		if !ok {
+			best[field.name] = jsonFieldChoice{index: i}
+			continue
+		}
+		switch compareJSONFieldPriority(field, candidates[prior.index]) {
+		case -1:
+			best[field.name] = jsonFieldChoice{index: i}
+		case 0:
 			prior.conflict = true
 			best[field.name] = prior
 		}

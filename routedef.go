@@ -473,7 +473,7 @@ func routeQueryFields[C ~string](d *docRegistry[C], r *apispec.Route) ([]string,
 	if r.Req == nil || r.Req.Kind() != reflect.Struct {
 		return nil, errors.New("query request must be a struct")
 	}
-	fields, err := d.jsonFields(r.Req)
+	fields, err := jsonFields(d.cfg, r.Req)
 	if err != nil {
 		return nil, err
 	}
