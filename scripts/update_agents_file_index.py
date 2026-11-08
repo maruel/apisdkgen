@@ -31,6 +31,8 @@ Add a one-line index summary (the first meaningful comment line):
   - Keep it under 120 characters; favor compact keywords over sentences.
   - Do not wrap it: later lines are ignored.
   - It must be within the first {SUMMARY_SCAN_LINES} lines.
+  - For Python inline metadata, put the summary before # /// script.
+  - For Markdown front matter, put a comment before the first YAML field.
   - Do not group it in license notice. Add an empty line to disambiguate.
   - Omit the filename and generic labels such as "Goal"."""
 
@@ -50,7 +52,9 @@ Index summary examples:
     # Copyright 2026 Example Corp. All rights reserved.
 
     # trace parsing, bottleneck diagnostics, report output
-    '''Foo bar'''
+    # /// script
+    # dependencies = ["example"]
+    # ///
   Go:
     // Copyright 2026 Example Corp. All rights reserved.
 
@@ -71,7 +75,8 @@ def get_git_files() -> list[str]:
             text=True,
             check=True,
         )
-        return [f for f in result.stdout.split("\0") if f and os.path.lexists(f)]
+        # Git lists unmerged paths once per index stage during a merge or rebase.
+        return list(dict.fromkeys(f for f in result.stdout.split("\0") if f and os.path.lexists(f)))
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         print(f"Error listing git files: {e}", file=sys.stderr)
         return []
@@ -167,18 +172,13 @@ def get_file_description(filepath):
     with open(filepath, encoding="utf-8") as f:
         lines = [f.readline() for _ in range(SUMMARY_SCAN_LINES)]
     in_copyright = False
-    in_script_metadata = False
     for i, line in enumerate(lines):
         if not line:
             break
         sline = line.strip()
-        if in_script_metadata:
-            if sline == "# ///":
-                in_script_metadata = False
-            continue
+        # Metadata comments are not summaries; the summary must precede them.
         if fname.endswith(".py") and sline == "# /// script":
-            in_script_metadata = True
-            continue
+            return ""
         if not sline:
             in_copyright = False
             continue
