@@ -21,6 +21,20 @@ type testRecursiveMap map[string]testRecursiveMap
 type testRecursiveNode struct {
 	Next *testRecursiveNode `json:"next,omitempty"`
 }
+type testRecursivePointer *testRecursivePointer
+type testRecursivePointerRoot struct {
+	Node *testRecursiveNode `json:"node"`
+}
+type testRecursiveTree struct {
+	Children []testRecursiveTree          `json:"children,omitempty"`
+	ByName   map[string]testRecursiveTree `json:"byName,omitempty"`
+}
+type testRecursiveSliceRoot struct {
+	Trees []testRecursiveTree `json:"trees"`
+}
+type testRecursiveMapRoot struct {
+	Trees map[string]testRecursiveTree `json:"trees"`
+}
 type testTreeChildren []testTree
 type testTree struct {
 	Children testTreeChildren `json:"children"`
@@ -102,6 +116,14 @@ func TestSDKTypeDiscovery(t *testing.T) {
 			{"recursive map TypeScript", reflect.TypeFor[testRecursiveMap](), "TypeScript", false},
 			{"recursive node TypeScript", reflect.TypeFor[testRecursiveNode](), "TypeScript", false},
 			{"recursive node Kotlin", reflect.TypeFor[testRecursiveNode](), "Kotlin", false},
+			{"pointer-indirected root TypeScript", reflect.TypeFor[testRecursivePointerRoot](), "TypeScript", false},
+			{"pointer-indirected root Kotlin", reflect.TypeFor[testRecursivePointerRoot](), "Kotlin", false},
+			{"slice-indirected root TypeScript", reflect.TypeFor[testRecursiveSliceRoot](), "TypeScript", false},
+			{"slice-indirected root Kotlin", reflect.TypeFor[testRecursiveSliceRoot](), "Kotlin", false},
+			{"slice-indirected root Swift", reflect.TypeFor[testRecursiveSliceRoot](), "Swift", false},
+			{"map-indirected root TypeScript", reflect.TypeFor[testRecursiveMapRoot](), "TypeScript", false},
+			{"map-indirected root Kotlin", reflect.TypeFor[testRecursiveMapRoot](), "Kotlin", false},
+			{"map-indirected root Swift", reflect.TypeFor[testRecursiveMapRoot](), "Swift", false},
 			{"container-indirected tree Kotlin", reflect.TypeFor[testTree](), "Kotlin", false},
 			{"container-indirected tree Swift", reflect.TypeFor[testTree](), "Swift", false},
 			{"nested named map TypeScript", reflect.TypeFor[testContainerRoot](), "TypeScript", false},
@@ -170,6 +192,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}{
 			{"recursive slice Kotlin", reflect.TypeFor[testRecursiveSlice](), "Kotlin", nil, "version v1: invalid SDK types: Kotlin does not support recursive container alias apisdkgen.testRecursiveSlice"},
 			{"recursive map Swift", reflect.TypeFor[testRecursiveMap](), "Swift", nil, "version v1: invalid SDK types: Swift does not support recursive container alias apisdkgen.testRecursiveMap"},
+			{"recursive pointer TypeScript", reflect.TypeFor[testRecursivePointer](), "TypeScript", nil, "version v1: invalid SDK types: recursive pointer type apisdkgen.testRecursivePointer is unsupported"},
 			{"inline node Swift", reflect.TypeFor[testRecursiveNode](), "Swift", nil, "version v1: invalid SDK types: unsupported Swift inline recursive struct apisdkgen.testRecursiveNode"},
 			{"reflected name collision", reflect.TypeFor[ClientScope](), "TypeScript", reflect.TypeFor[apispec.ClientScope](), "version v1: invalid SDK types: generated type name \"ClientScope\" is shared by apisdkgen.ClientScope and apispec.ClientScope"},
 			{"TypeScript HTTP global", reflect.TypeFor[Response](), "TypeScript", nil, "version v1: invalid SDK types: TypeScript type name \"Response\" conflicts with a generated declaration"},

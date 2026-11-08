@@ -78,6 +78,10 @@ func walkSDKTypes[C ~string](c *apispec.Config[C], seeds []reflect.Type) ([]refl
 	var walk func(reflect.Type) error
 	walk = func(t reflect.Type) error {
 		if state[t] == sdkVisitActive {
+			// Unnamed containers and pointers close cycles through named DTOs.
+			if t.Name() == "" {
+				return nil
+			}
 			if (t.Kind() == reflect.Slice || t.Kind() == reflect.Map) && !isSDKPkg(c, t.PkgPath()) {
 				return fmt.Errorf("recursive container %s must belong to an SDK package or have a SpecialType mapping", t)
 			}
