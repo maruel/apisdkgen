@@ -25,6 +25,9 @@ type testJSONRPCRequest struct{}
 
 type testJSONRPCResponse struct{}
 
+type State string
+type testAuthKind string
+
 type testSDKEvent struct {
 	Kind string `json:"kind"`
 	Text string `json:"text,omitempty"`
@@ -169,6 +172,10 @@ func TestGoTypeToDoc(t *testing.T) {
 
 func TestLoadDocsInDir(t *testing.T) {
 	t.Parallel()
+	cfg := apispec.Config[string]{
+		SDKPackagePaths: map[string]struct{}{reflect.TypeFor[State]().PkgPath(): {}},
+		ExtraSeeds:      []reflect.Type{reflect.TypeFor[State](), reflect.TypeFor[testAuthKind]()},
+	}
 
 	t.Run("string constants", func(t *testing.T) {
 		t.Parallel()
@@ -197,7 +204,7 @@ func TestLoadDocsInDir(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State string\n"+tc.source+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
+				docs, err := loadDocsInDir(dir, &cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -213,7 +220,7 @@ func TestLoadDocsInDir(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State (string)\nconst StateFirst State = \"first\"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
+		docs, err := loadDocsInDir(dir, &cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -239,7 +246,7 @@ func TestLoadDocsInDir(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte("package fixture\ntype State string\n"+tc.declaration+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				_, err := loadDocsInDir(dir, &apispec.Config[string]{})
+				_, err := loadDocsInDir(dir, &cfg)
 				if err == nil || err.Error() != tc.want {
 					t.Fatalf("loadDocsInDir() = %v", err)
 				}
@@ -263,7 +270,7 @@ const (
 		if err := os.WriteFile(filepath.Join(dir, "types.go"), []byte(source), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		docs, err := loadDocsInDir(dir, &apispec.Config[string]{})
+		docs, err := loadDocsInDir(dir, &cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -679,6 +686,42 @@ func TestDocRegistry(t *testing.T) {
 
 func TestGenerate(t *testing.T) {
 	t.Parallel()
+	t.Run("reachable aliases", func(t *testing.T) {
+		t.Parallel()
+		source := t.TempDir()
+		if err := os.WriteFile(filepath.Join(source, "types.go"), []byte(`package fixture
+type State string
+const StateReady State = "ready"
+type testAuthKind string
+const testAuthKindToken testAuthKind = "token"
+type Unused string
+const UnusedBroken Unused = external.Value
+type É string
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, lang := range []Language{Kotlin, Swift, TypeScript} {
+			t.Run(string(lang), func(t *testing.T) {
+				t.Parallel()
+				cfg := discoveryConfig(reflect.TypeFor[State]())
+				cfg.ExtraSeeds = append(cfg.ExtraSeeds, reflect.TypeFor[testAuthKind]())
+				root := filepath.Join(t.TempDir(), "sdk")
+				api := NewAPI(root, "FixtureSDK", NewVersion("v1", source, cfg))
+				api.Languages = []Language{lang}
+				if err := api.Generate(); err != nil {
+					t.Fatal(err)
+				}
+				if lang == TypeScript {
+					data, err := fs.ReadFile(os.DirFS(root), "ts/v1/types.gen.ts")
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertGolden(t, "types.gen.ts", string(data))
+				}
+				compileDiscovery(t, string(lang), root)
+			})
+		}
+	})
 	t.Run("file endings", func(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {

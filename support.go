@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -46,6 +47,21 @@ func kotlinStringLiteral(value string) string {
 // comments, source file tracking, and alias type definitions, then attaches the
 // immutable configuration and merges its configured error-code alias.
 func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[C], error) {
+	types, err := walkSDKTypes(cfg, sdkSeedTypes(cfg))
+	if err != nil {
+		return nil, err
+	}
+	needed := map[string]struct{}{}
+	for _, t := range types {
+		if t.Kind() == reflect.String {
+			needed[t.Name()] = struct{}{}
+		}
+	}
+	codeName := ""
+	if len(cfg.ErrorCodes) != 0 {
+		codeName = reflect.TypeFor[C]().Name()
+		needed[codeName] = struct{}{}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -145,7 +161,7 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 		}
 	}
 
-	// Resolve only constants belonging to discovered string aliases. Other
+	// Resolve only constants belonging to reachable string aliases. Other
 	// declarations remain available as references without requiring a complete
 	// type-checkable consumer package.
 	resolver := stringConstResolver{aliases: stringAliases, declarations: map[string]stringConstDecl{}, values: map[string]stringConstValue{}, active: map[string]struct{}{}}
@@ -180,7 +196,8 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 	}
 	aliasConsts := map[string][]aliasConstant{}
 	for _, name := range names {
-		if resolver.constantType(name, map[string]struct{}{}) == "" {
+		typ := resolver.constantType(name, map[string]struct{}{})
+		if _, ok := needed[typ]; !ok || typ == codeName {
 			continue
 		}
 		v, err := resolver.resolve(name)
@@ -193,6 +210,9 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 	// Build aliases in sorted order for deterministic output.
 	aliasNames := slices.Sorted(maps.Keys(stringAliases))
 	for _, name := range aliasNames {
+		if _, ok := needed[name]; !ok {
+			continue
+		}
 		file := stringAliases[name]
 		reg.aliases = append(reg.aliases, aliasInfo{
 			name:      name,

@@ -6,21 +6,6 @@ export type ISOTimestamp = string & { readonly __brand: "ISOTimestamp" };
 //////////
 // source: types.go
 
-export type Language =
-  | "Kotlin"
-  | "Swift"
-  | "TypeScript";
-/**
- * Supported values.
- */
-export const Kotlin = "Kotlin";
-export const Swift = "Swift";
-export const TypeScript = "TypeScript";
-
-export type testDocAuthKind = string;
-
-export type testEnvelopeKind = string;
-
 export type testGeneratedErrorCode =
   | "BAD_REQUEST"
   | "UNKNOWN"

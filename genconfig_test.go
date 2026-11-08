@@ -192,13 +192,13 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}{
 			{"recursive slice Kotlin", reflect.TypeFor[testRecursiveSlice](), "Kotlin", nil, "version v1: invalid SDK types: Kotlin does not support recursive container alias apisdkgen.testRecursiveSlice"},
 			{"recursive map Swift", reflect.TypeFor[testRecursiveMap](), "Swift", nil, "version v1: invalid SDK types: Swift does not support recursive container alias apisdkgen.testRecursiveMap"},
-			{"recursive pointer TypeScript", reflect.TypeFor[testRecursivePointer](), "TypeScript", nil, "version v1: invalid SDK types: recursive pointer type apisdkgen.testRecursivePointer is unsupported"},
+			{"recursive pointer TypeScript", reflect.TypeFor[testRecursivePointer](), "TypeScript", nil, "version v1: loading docs: recursive pointer type apisdkgen.testRecursivePointer is unsupported"},
 			{"inline node Swift", reflect.TypeFor[testRecursiveNode](), "Swift", nil, "version v1: invalid SDK types: unsupported Swift inline recursive struct apisdkgen.testRecursiveNode"},
 			{"reflected name collision", reflect.TypeFor[ClientScope](), "TypeScript", reflect.TypeFor[apispec.ClientScope](), "version v1: invalid SDK types: generated type name \"ClientScope\" is shared by apisdkgen.ClientScope and apispec.ClientScope"},
 			{"TypeScript HTTP global", reflect.TypeFor[Response](), "TypeScript", nil, "version v1: invalid SDK types: TypeScript type name \"Response\" conflicts with a generated declaration"},
 			{"TypeScript runtime name", reflect.TypeFor[APIClient](), "TypeScript", nil, "version v1: invalid SDK types: TypeScript type name \"APIClient\" conflicts with a generated declaration"},
 			{"Swift runtime name", reflect.TypeFor[JSONValue](), "Swift", nil, "version v1: invalid SDK types: generated Swift type name \"JSONValue\" conflicts with a generated declaration"},
-			{"Kotlin serializer name", reflect.TypeFor[testDocAuthKindSerializer](), "Kotlin", nil, "version v1: invalid SDK types: generated Kotlin type name \"testDocAuthKindSerializer\" conflicts with a generated declaration"},
+			{"Kotlin serializer name", reflect.TypeFor[testDocAuthKindSerializer](), "Kotlin", reflect.TypeFor[testDocAuthKind](), "version v1: invalid SDK types: generated Kotlin type name \"testDocAuthKindSerializer\" conflicts with a generated declaration"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -222,7 +222,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		cfg := discoveryConfig(reflect.TypeFor[testRecursiveMap]())
 		cfg.SDKPackagePaths = nil
 		api := newDiscoveryAPI("TypeScript", filepath.Join(t.TempDir(), "sdk"), cfg)
-		const want = "version v1: invalid SDK types: recursive container apisdkgen.testRecursiveMap must belong to an SDK package or have a SpecialType mapping"
+		const want = "version v1: loading docs: recursive container apisdkgen.testRecursiveMap must belong to an SDK package or have a SpecialType mapping"
 		if err := api.Generate(); err == nil || err.Error() != want {
 			t.Fatalf("Generate() = %v; want %q", err, want)
 		}

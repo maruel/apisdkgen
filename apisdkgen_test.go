@@ -4,6 +4,7 @@ package apisdkgen
 
 import (
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/maruel/apisdkgen/apispec"
 )
@@ -82,7 +84,11 @@ func TestGenerateErrors(t *testing.T) {
 		if err := os.WriteFile(output, []byte(previous), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		api := NewAPI(root, "FixtureSDK", NewVersion("v1", root, apispec.Config[string]{}))
+		cfg := apispec.Config[string]{
+			SDKPackagePaths: map[string]struct{}{reflect.TypeFor[State]().PkgPath(): {}},
+			ExtraSeeds:      []reflect.Type{reflect.TypeFor[State]()},
+		}
+		api := NewAPI(root, "FixtureSDK", NewVersion("v1", root, cfg))
 		api.Languages = []Language{TypeScript}
 		if err := api.Generate(); err == nil || err.Error() != "version v1: loading docs: string constant StateFirst: unsupported expression *ast.SelectorExpr" {
 			t.Fatalf("Generate() = %v", err)
@@ -160,8 +166,9 @@ func TestGenerateErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("unseeded alias name", func(t *testing.T) {
+	t.Run("seeded alias name", func(t *testing.T) {
 		t.Parallel()
+		type É string //nolint:asciicheck // The reflected name exercises ASCII validation.
 		source := t.TempDir()
 		if err := os.WriteFile(filepath.Join(source, "types.go"), []byte("package fixture\ntype É string\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -172,7 +179,7 @@ func TestGenerateErrors(t *testing.T) {
 				cfg := apispec.Config[string]{
 					KotlinPackage:   "fixture",
 					SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
-					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
+					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError](), reflect.TypeFor[É]()},
 					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError"},
 					Routes:          []apispec.Route{{Name: "list", Method: "GET", Path: "/items", Resp: reflect.TypeFor[testSDKEvent]()}},
 				}
@@ -622,6 +629,7 @@ export const clients = [v1(), v2()];
 		if err := api.Verify(); err != nil {
 			t.Fatal(err)
 		}
+		files = discoveryFiles(t, root)
 		if err := os.WriteFile(filepath.Join(root, "unexpected"), []byte("old output"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -632,7 +640,122 @@ export const clients = [v1(), v2()];
 			t.Fatal(err)
 		}
 		if got := discoveryFiles(t, root); !reflect.DeepEqual(files, got) {
-			t.Fatal("generation did not replace entire package")
+			t.Fatal("generation changed expected files or caches")
+		}
+	})
+	t.Run("unchanged files retain identity and modification time", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "sdk")
+		api := NewAPI(root, "FixtureSDK", first)
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "ts", "v1", "api.gen.ts")
+		stamp := time.Unix(1_700_000_000, 0)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) {
+			t.Fatal("unchanged generation rewrote the file")
+		}
+	})
+	t.Run("removed languages remove their caches", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "sdk")
+		api := NewAPI(root, "FixtureSDK", first)
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		cache := filepath.Join(root, "kotlin", ".gradle")
+		if err := os.MkdirAll(cache, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cache, "keep"), []byte("cached build"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(root, "kotlin")); !os.IsNotExist(err) {
+			t.Fatalf("obsolete Kotlin package survived: %v", err)
+		}
+		if err := api.Verify(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("publication errors are reported", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission checks")
+		}
+		root := filepath.Join(t.TempDir(), "sdk")
+		api := NewAPI(root, "FixtureSDK", first)
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(root, "ts")
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			// #nosec G302 -- This is a directory under the test's private output root.
+			if err := os.Chmod(dir, 0o750); err != nil {
+				t.Error(err)
+			}
+		})
+		if err := api.Generate(); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("publication error = %v; want permission failure", err)
+		}
+	})
+	t.Run("expected file and cache symlinks do not touch targets", func(t *testing.T) {
+		t.Parallel()
+		root := filepath.Join(t.TempDir(), "sdk")
+		api := NewAPI(root, "FixtureSDK", first)
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		external := t.TempDir()
+		target := filepath.Join(external, "keep")
+		if err := os.WriteFile(target, []byte("external"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "ts", "v1", "api.gen.ts")
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		cache := filepath.Join(root, "ts", "node_modules")
+		if err := os.Symlink(external, cache); err != nil {
+			t.Fatal(err)
+		}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := fs.ReadFile(os.DirFS(external), "keep"); err != nil || string(data) != "external" {
+			t.Fatalf("external target changed: %q, %v", data, err)
+		}
+		if _, err := os.Lstat(cache); !os.IsNotExist(err) {
+			t.Fatalf("cache symlink survived: %v", err)
+		}
+		if err := api.Verify(); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("output directory symlinks", func(t *testing.T) {

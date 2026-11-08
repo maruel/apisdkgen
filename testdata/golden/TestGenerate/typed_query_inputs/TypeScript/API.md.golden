@@ -34,23 +34,6 @@ All errors return:
 
 ## Types
 
-### Language
-
-Language selects a generated client language.
-
-| Value | Description |
-|-------|-------------|
-| `Kotlin` | Kotlin generates a Kotlin JVM package. |
-| `Swift` | Swift generates a Swift package. |
-| `TypeScript` | TypeScript generates a TypeScript package. |
-
-### testGeneratedErrorCode
-
-| Value | Description |
-|-------|-------------|
-| `BAD_REQUEST` |  |
-| `UNKNOWN` |  |
-
 ### testQueryInput
 
 | Field | Type | Description | Required |

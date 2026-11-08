@@ -9,6 +9,7 @@ package apisdkgen
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -229,7 +230,8 @@ func NewAPI(outputDir, name string, versions ...Version) API {
 	return API{outputDir: filepath.Clean(outputDir), name: name, versions: slices.Clone(versions)}
 }
 
-// Generate prepares every version and manifest, then clears and rebuilds the package.
+// Generate prepares every version and manifest, then updates the package.
+// Unchanged files and supported caches in selected language packages are preserved.
 // Preparation errors leave existing output unchanged. Publication errors may leave
 // incomplete output; fix the error and rerun Generate to rebuild the package.
 func (api *API) Generate() error {
@@ -237,15 +239,27 @@ func (api *API) Generate() error {
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(api.outputDir); err != nil {
-		return fmt.Errorf("clear output directory %s: %w", api.outputDir, err)
+	if err := out.cleanDirectory(api.outputDir, api.outputDir, out.directories()); err != nil {
+		return err
 	}
 	for _, path := range out.paths() {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			return err
 		}
+		previous, err := readOutput(path, len(out.files[path]))
+		if err == nil && string(previous) == out.files[path] {
+			continue
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read output %s: %w", path, err)
+		}
+		if err == nil {
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("replace output %s: %w", path, err)
+			}
+		}
 		if err := os.WriteFile(path, []byte(out.files[path]), 0o600); err != nil {
-			return err
+			return fmt.Errorf("write output %s: %w", path, err)
 		}
 	}
 	return nil
@@ -260,9 +274,8 @@ func (api *API) Verify() error {
 	if info, err := os.Lstat(api.outputDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("SDK output is stale:\nchanged: %s", api.outputDir)
 	}
-	out := &verifyOutput{expected: map[string]struct{}{}}
+	out := &verifyOutput{expected: prepared.directories()}
 	for _, path := range prepared.paths() {
-		out.expectDirectory(filepath.Dir(path))
 		if err := out.checkFile(path, prepared.files[path]); err != nil {
 			return err
 		}
@@ -276,7 +289,7 @@ func (api *API) Verify() error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() && slices.Contains([]string{"kotlin/.gradle", "kotlin/.kotlin", "kotlin/build", "swift/.build", "swift/.swiftpm", "ts/node_modules"}, filepath.ToSlash(name)) {
+		if entry.IsDir() && isToolCache(name) {
 			return filepath.SkipDir
 		}
 		if _, ok := out.expected[path]; ok {
@@ -399,19 +412,71 @@ func (out *preparedOutput) paths() []string {
 	return paths
 }
 
+func (out *preparedOutput) directories() map[string]struct{} {
+	dirs := map[string]struct{}{}
+	for path := range out.files {
+		for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+			dirs[dir] = struct{}{}
+			if filepath.Dir(dir) == dir || dir == "." {
+				break
+			}
+		}
+	}
+	return dirs
+}
+
+// cleanDirectory removes obsolete entries and replaces unsafe output kinds before writing.
+func (out *preparedOutput) cleanDirectory(root, dir string, dirs map[string]struct{}) error {
+	info, err := os.Lstat(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect output %s: %w", dir, err)
+	}
+	if err == nil && !info.IsDir() {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("replace output directory %s: %w", dir, err)
+		}
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create output directory %s: %w", dir, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read output directory %s: %w", dir, err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if _, ok := dirs[path]; ok {
+			if err := out.cleanDirectory(root, path, dirs); err != nil {
+				return err
+			}
+			continue
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && isToolCache(rel) {
+			continue
+		}
+		if _, ok := out.files[path]; ok && entry.Type().IsRegular() {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove obsolete output %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func isToolCache(path string) bool {
+	return slices.Contains([]string{"kotlin/.gradle", "kotlin/.kotlin", "kotlin/build", "swift/.build", "swift/.swiftpm", "ts/node_modules"}, filepath.ToSlash(path))
+}
+
 type verifyOutput struct {
 	expected    map[string]struct{}
 	differences []string
 }
 
-func (out *verifyOutput) expectDirectory(dir string) {
-	for dir = filepath.Clean(dir); ; dir = filepath.Dir(dir) {
-		out.expected[dir] = struct{}{}
-		if filepath.Dir(dir) == dir || dir == "." {
-			return
-		}
-	}
-}
 func (out *verifyOutput) checkFile(path, content string) error {
 	path = filepath.Clean(path)
 	out.expected[path] = struct{}{}
@@ -419,7 +484,7 @@ func (out *verifyOutput) checkFile(path, content string) error {
 		out.differences = append(out.differences, "changed: "+path)
 		return nil
 	}
-	got, err := os.ReadFile(path)
+	got, err := readOutput(path, len(content))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		out.differences = append(out.differences, "missing: "+path)
@@ -429,6 +494,17 @@ func (out *verifyOutput) checkFile(path, content string) error {
 		out.differences = append(out.differences, "changed: "+path)
 	}
 	return nil
+}
+
+// readOutput bounds comparison reads to the expected length plus one mismatch byte.
+func readOutput(path string, size int) ([]byte, error) {
+	// #nosec G304 -- The caller compares only paths in its prepared generated package.
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(size)+1))
+	return data, errors.Join(err, f.Close())
 }
 
 func generateVersion[C ~string](sourceDir string, output outputPaths, config apispec.Config[C], sink *preparedOutput) error {

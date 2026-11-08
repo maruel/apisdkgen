@@ -74,16 +74,24 @@ Swift clients target Apple Foundation networking APIs.
 
 The entire output directory belongs to the generator. Do not store handwritten
 files inside it. `API.Generate` prepares every version and package manifest
-before recursively clearing the directory and writing the result. Preparation
-errors preserve existing output; publication errors can leave incomplete output,
-so fix the cause and rerun generation. Separate API packages must use separate,
-non-overlapping output directories.
+before updating changed files and removing obsolete entries. Unchanged files
+retain their identity and modification time. Preparation errors preserve existing
+output; publication errors can leave incomplete output, so fix the cause and rerun
+generation. Separate API packages must use separate, non-overlapping output
+directories.
 
 `API.Verify` checks the complete package without changing files. It reports
 missing or changed generated files and unexpected entries. Standard tool cache
 directories (`ts/node_modules`, `kotlin/.gradle`, `kotlin/.kotlin`, `kotlin/build`,
-`swift/.build`, and `swift/.swiftpm`) are ignored during verification and cleared
-during generation. Generated `.gitignore` files exclude these caches from Git.
+`swift/.build`, and `swift/.swiftpm`) are ignored during verification and preserved
+during generation while their language package remains selected. Removing a
+language removes its package and caches. Cache paths must be directories;
+generation removes cache symlinks without following them. Generated `.gitignore`
+files exclude these caches from Git.
+
+String enum declarations are generated only when reached through route inputs or
+responses, explicit `ExtraSeeds`, or configured error codes. Unrelated source
+aliases and their constants do not affect generated packages.
 
 Run `make test-deps` to install pinned TypeScript, Kotlin, Swift (on Linux),
 and JVM libraries in the ignored `.test-deps` directory. The installer needs
