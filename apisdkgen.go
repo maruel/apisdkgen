@@ -1,8 +1,8 @@
 // Package apisdkgen generates typed client SDKs and API references.
 // It supports TypeScript, Kotlin, and Swift from Go DTO types and route definitions.
 //
-// SDK specifications are defined by each package in an exported SDKAPI()
-// function returning an apispec.Config with that API's error-code type. The
+// SDK specifications are defined by each package in an exported, immutable
+// SDKAPI variable of type apispec.Config with that API's error-code type. The
 // consumer's gen-api-sdk command registers those specs and chooses output paths.
 package apisdkgen
 

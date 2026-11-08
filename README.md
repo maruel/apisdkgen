@@ -10,8 +10,8 @@ one generated package from your application's generation command:
 
 ```go
 api := apisdkgen.NewAPI("sdk/voicegateway", "VoiceGatewaySDK",
-    apisdkgen.NewVersion("v1", "voicegateway/api/v1", v1.SDKAPI()),
-    apisdkgen.NewVersion("v2", "voicegateway/api/v2", v2.SDKAPI()),
+    apisdkgen.NewVersion("v1", "voicegateway/api/v1", v1.SDKAPI),
+    apisdkgen.NewVersion("v2", "voicegateway/api/v2", v2.SDKAPI),
 )
 err := api.Generate()
 ```
