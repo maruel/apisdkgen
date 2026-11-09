@@ -76,7 +76,7 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 	}
 	respType := routeJSONType(r.Resp, r.IsArray, TypeScript)
 
-	args := make([]string, 0, len(params)+len(r.QueryParams)+1)
+	args := make([]string, 0, len(params)+len(r.QueryParams)+2)
 	for _, p := range params {
 		args = append(args, p+": string")
 	}
@@ -93,38 +93,26 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 	if r.HeadersArg {
 		args = append(args, "headers: Record<string, string> = {}")
 	}
+	args = append(args, "signal?: AbortSignal")
+	bodyArg := "undefined"
+	if hasReq {
+		bodyArg = "req"
+	}
+	headerArg := "undefined"
+	if r.HeadersArg {
+		headerArg = "headers"
+	}
 
 	tsPath := buildTSPath(r.Path, params, r.QueryParams)
 	if r.Query != nil {
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => {\n", r.Name, strings.Join(args, ", "), respType)
 		writeTSQuery(b, fields)
-		bodyArg := ""
-		if hasReq || r.HeadersArg {
-			bodyArg = ", undefined"
-			if hasReq {
-				bodyArg = ", req"
-			}
-		}
-		if r.HeadersArg {
-			bodyArg += ", headers"
-		}
-		fmt.Fprintf(b, "      return request<%s>(%q, %s + (search.size ? `?${search}` : \"\")%s);\n", respType, r.Method, tsPath, bodyArg)
+		fmt.Fprintf(b, "      return request<%s>(%q, %s + (search.size ? `?${search}` : \"\"), %s, %s, signal);\n", respType, r.Method, tsPath, bodyArg, headerArg)
 		b.WriteString("    },\n")
 		return
 	}
 
-	headerArg := ""
-	if r.HeadersArg {
-		headerArg = ", headers"
-	}
-	switch {
-	case hasReq:
-		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s, req%s),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath, headerArg)
-	case r.HeadersArg:
-		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s, undefined, headers),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath)
-	default:
-		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath)
-	}
+	fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s, %s, %s, signal),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath, bodyArg, headerArg)
 }
 
 // tsQueryType preserves query omission rules independently of JSON presence.

@@ -139,6 +139,9 @@ func (o *outputPaths) validateRoute(route *apispec.Route) error {
 		parameters[name] = struct{}{}
 	}
 	reserved := []string{}
+	if o.TypeScriptDir != "" && !route.IsSSE {
+		reserved = append(reserved, "signal")
+	}
 	if route.Query != nil {
 		reserved = append(reserved, "query")
 		if o.TypeScriptDir != "" {

@@ -1141,6 +1141,71 @@ type É string
 		})
 	})
 
+	t.Run("TypeScript cancellation", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		cfg := apispec.Config[string]{
+			SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testSDKEvent]().PkgPath(): {}},
+			ExtraSeeds:      []reflect.Type{reflect.TypeFor[testGeneratedErrorResponse]()},
+			ErrorModel:      apispec.ClientErrorModel{TypeName: "testGeneratedErrorResponse", TSDetailsExpr: "undefined"},
+			Routes: []apispec.Route{
+				{Name: "read", Method: "GET", Path: "/read", Resp: reflect.TypeFor[testSDKEvent]()},
+				{Name: "write", Method: "POST", Path: "/write", Req: reflect.TypeFor[testSDKEvent](), Resp: reflect.TypeFor[testSDKEvent]()},
+				{Name: "query", Method: "GET", Path: "/query", Query: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent]()},
+				{Name: "queryHeaders", Method: "GET", Path: "/query-headers", Query: reflect.TypeFor[testEmbeddedQueryRequest](), Resp: reflect.TypeFor[testSDKEvent](), HeadersArg: true},
+			},
+		}
+		api := NewAPI(dir, "FixtureSDK", NewVersion("v1", ".", cfg))
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		canceled := make(chan string, 4)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/canceled" {
+				select {
+				case <-canceled:
+					_, _ = w.Write([]byte("canceled"))
+				case <-r.Context().Done():
+				}
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"kind":"`))
+			if err := http.NewResponseController(w).Flush(); err != nil {
+				t.Errorf("flush response: %v", err)
+				return
+			}
+			<-r.Context().Done()
+			canceled <- r.URL.Path
+		}))
+		t.Cleanup(server.Close)
+		dir = filepath.Join(dir, "ts", "v1")
+		consumer, err := os.ReadFile("testdata/CancellationClient.ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// #nosec G703 -- Source is written only under this test's private generated output.
+		if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), consumer, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runtimeDir := t.TempDir()
+		for _, cmd := range []*exec.Cmd{
+			// #nosec G204 G702 -- Fixed compilers and flags consume trusted fixtures and isolated test outputs without a shell.
+			exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts"),
+			// #nosec G204 G702 -- Execute the compiled fixture against the isolated local test server.
+			exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js"), server.URL),
+		} {
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", cmd.Path, err, out)
+			}
+			if cmd.Args[0] == "node" && strings.TrimSpace(string(out)) != "cancellation verified" {
+				t.Fatalf("Cancellation fixture did not report completion: %s", out)
+			}
+		}
+	})
 	t.Run("TypeScript query headers", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()

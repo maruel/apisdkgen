@@ -1,5 +1,5 @@
-    list: (query: testEmbeddedQueryRequest): Promise<testEmbeddedQueryRequest> => {
+    list: (query: testEmbeddedQueryRequest, signal?: AbortSignal): Promise<testEmbeddedQueryRequest> => {
       const search = new URLSearchParams();
       if (query["limit"] !== undefined && query["limit"] !== null) search.set("limit", String(query["limit"]));
-      return request<testEmbeddedQueryRequest>("GET", "/items" + (search.size ? `?${search}` : ""));
+      return request<testEmbeddedQueryRequest>("GET", "/items" + (search.size ? `?${search}` : ""), undefined, undefined, signal);
     },

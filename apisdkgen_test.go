@@ -283,6 +283,7 @@ func TestGenerateErrors(t *testing.T) {
 			{"invalid query parameter", func(c *apispec.Config[string]) { c.Routes[0].QueryParams = []string{"page-size"} }, `routes[0] ("getEvent"): invalid query parameter "page-size"`},
 			{"duplicate query parameter", func(c *apispec.Config[string]) { c.Routes[0].QueryParams = []string{"page", "page"} }, `routes[0] ("getEvent"): duplicate parameter "page"`},
 			{"argument collision", func(c *apispec.Config[string]) { c.Routes[0].Path = "/{headers}"; c.Routes[0].HeadersArg = true }, `routes[0] ("getEvent"): parameter "headers" conflicts with a generated argument`},
+			{"cancellation argument collision", func(c *apispec.Config[string]) { c.Routes[0].Path = "/{signal}" }, `routes[0] ("getEvent"): parameter "signal" conflicts with a generated argument`},
 			{"nonstruct query", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testGeneratedErrorCode]() }, `routes[0] ("getEvent"): query type must be a struct`},
 			{"no query fields", func(c *apispec.Config[string]) { c.Routes[0].Query = reflect.TypeFor[testSDKEvent]() }, `routes[0] ("getEvent"): query type apisdkgen.testSDKEvent has no query-tagged JSON fields`},
 			{"mixed query modes", func(c *apispec.Config[string]) {

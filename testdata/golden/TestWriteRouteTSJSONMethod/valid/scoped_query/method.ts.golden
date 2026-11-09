@@ -1,6 +1,6 @@
-    list: (id: string, query: query): Promise<query> => {
+    list: (id: string, query: query, signal?: AbortSignal): Promise<query> => {
       const search = new URLSearchParams();
       if (query["limit"] !== undefined && query["limit"] !== null) search.set("limit", String(query["limit"]));
       if (query["unread_only"] !== undefined && query["unread_only"] !== null) search.set("unread_only", String(query["unread_only"]));
-      return request<query>("GET", `/api/v1/workspaces/${encodeURIComponent(wsID)}/items/${encodeURIComponent(id)}` + (search.size ? `?${search}` : ""));
+      return request<query>("GET", `/api/v1/workspaces/${encodeURIComponent(wsID)}/items/${encodeURIComponent(id)}` + (search.size ? `?${search}` : ""), undefined, undefined, signal);
     },

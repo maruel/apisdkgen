@@ -1746,8 +1746,11 @@ func (d *docRegistry[C]) generateTS(outDir string, out *preparedOutput) error {
 	b.WriteString("export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>;\n\n")
 	if hasRequest {
 		b.WriteString(`function makeRequester(fetchFn: FetchFn) {
-  return async function request<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
-    const init: RequestInit = { method, headers: { "Content-Type": "application/json", ...headers }, signal: AbortSignal.timeout(60_000) };
+  return async function request<T>(method: string, path: string, body: unknown, headers: Record<string, string> | undefined, callerSignal?: AbortSignal): Promise<T> {
+    const deadline = AbortSignal.timeout(60_000);
+    const signal = callerSignal ? AbortSignal.any([callerSignal, deadline]) : deadline;
+    signal.throwIfAborted();
+    const init: RequestInit = { method, headers: { "Content-Type": "application/json", ...headers }, signal };
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetchFn(path, init);
     if (!res.ok) {
