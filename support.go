@@ -174,7 +174,7 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 			}
 			var prior *ast.ValueSpec
 			for _, spec := range gen.Specs {
-				vs := spec.(*ast.ValueSpec)
+				vs := spec.(*ast.ValueSpec) //nolint:forcetypeassert // Const declarations contain only value specs.
 				value := vs
 				if len(vs.Values) == 0 {
 					value = prior

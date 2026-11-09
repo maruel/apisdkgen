@@ -84,11 +84,13 @@ type testTSEmbeddedIdentity struct {
 type testTSEmbeddedResponse struct {
 	testTSEmbeddedQuotas
 	testTSEmbeddedIdentity
+
 	Name string `json:"name"`
 }
 
 type testJSONShadow struct {
 	testTSEmbeddedQuotas
+
 	Limit string `json:"limit"`
 }
 
@@ -98,8 +100,9 @@ type testJSONSameName struct {
 
 type testJSONConflict struct {
 	testTSEmbeddedQuotas
-	testJSONSameName        //nolint:govet // Deliberately tests an encoding/json name collision.
-	Name             string `json:"name"`
+	testJSONSameName //nolint:govet // Deliberately tests an encoding/json name collision.
+
+	Name string `json:"name"`
 }
 
 type testJSONPointerEmbed struct {
@@ -531,7 +534,7 @@ func TestDocRegistry(t *testing.T) {
 			data := out.files[filepath.Join(dir, "ApiClient.kt")]
 			assertGolden(t, "ApiClient.kt", data)
 		})
-		t.Run("named events", func(t *testing.T) {
+		t.Run("named events", func(t *testing.T) { //nolint:dupl // Each language must exercise the same SSE contract.
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
 				{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
 				{Name: "stats", Handler: "onStats", Resp: reflect.TypeFor[testSDKEvent]()},
@@ -664,7 +667,7 @@ func TestDocRegistry(t *testing.T) {
 			data := out.files[filepath.Join(dir, "ApiClient.swift")]
 			assertGolden(t, "ApiClient.swift", data)
 		})
-		t.Run("named events", func(t *testing.T) {
+		t.Run("named events", func(t *testing.T) { //nolint:dupl // Each language must exercise the same SSE contract.
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
 				{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
 				{Name: "stats", Handler: "onStats", Resp: reflect.TypeFor[testSDKEvent]()},
@@ -1262,14 +1265,14 @@ if (false) client.rawEvents("", handlers);
 					}
 					if diff := cmp.Diff(want, r.URL.Query()); diff != "" || r.URL.ForceQuery {
 						t.Errorf("%s query (-want +got): %s; trailing query delimiter: %v", r.URL.Path, diff, r.URL.ForceQuery)
-						http.Error(w, "bad query", 400)
+						http.Error(w, "bad query", http.StatusBadRequest)
 						return
 					}
-					if r.Method == "POST" {
+					if r.Method == http.MethodPost {
 						var body testSDKEvent
 						if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Kind != "request" || r.Header.Get("X-Test") != "expected" {
 							t.Errorf("body/headers: %v, %+v, %v", err, body, r.Header)
-							http.Error(w, "bad body", 400)
+							http.Error(w, "bad body", http.StatusBadRequest)
 							return
 						}
 					} else if r.ContentLength > 0 {

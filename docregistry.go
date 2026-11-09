@@ -513,6 +513,7 @@ class ApiClient(
 	}
 	b.WriteString("\n")
 
+	//nolint:dupword // Generated Kotlin identifiers are not prose.
 	b.WriteString(`    // Each collection owns its backoff. Receiving primary values resets it.
     private class SSEBackoff {
         private var delayMs = 500L
@@ -568,6 +569,7 @@ func (d *docRegistry[C]) writeSwiftClient(outDir string, out *preparedOutput) er
 	if hasTypedQueries(d.cfg) {
 		b.WriteString("import CoreFoundation\n")
 	}
+	//nolint:dupword // Generated Swift identifiers are not prose.
 	b.WriteString(`import Foundation
 
 private struct SSETransportFailure: Error { let underlying: Error }
@@ -2431,6 +2433,7 @@ type jsonField struct {
 
 type jsonFieldCandidate struct {
 	jsonField
+
 	name   string
 	tagged bool
 }

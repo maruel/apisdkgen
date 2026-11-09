@@ -106,9 +106,10 @@ func TestGenerateErrors(t *testing.T) {
 		type otherPart struct{ Token string }
 		type deeper struct{ part }
 		type repeated struct {
-			Visible string `query:"visible"`
 			part
 			deeper
+
+			Visible string `query:"visible"`
 		}
 		type ignored struct {
 			Visible string `query:"visible"`
@@ -119,21 +120,24 @@ func TestGenerateErrors(t *testing.T) {
 			token   string `query:"token"` //nolint:unused // Reflection-only field verifies hidden query metadata is rejected.
 		}
 		type ignoredEmbedding struct {
+			part `json:"-"`
+
 			Visible string `query:"visible"`
-			part    `json:"-"`
 		}
 		type taggedEmbedding struct {
 			part `query:"nested"`
 		}
 		type shadowed struct {
-			Visible string `query:"visible"`
 			part
-			Token string
+
+			Visible string `query:"visible"`
+			Token   string
 		}
 		type ambiguous struct {
-			Visible string `query:"visible"`
 			part
 			otherPart
+
+			Visible string `query:"visible"`
 		}
 		for _, tc := range []struct {
 			name  string
@@ -605,9 +609,13 @@ export const clients = [v1(), v2()];
 				t.Fatal(err)
 			}
 			var pkg struct {
-				Name     string
-				Targets  []struct{ Name string }
-				Products []struct{ Name string }
+				Name    string `json:"name"`
+				Targets []struct {
+					Name string `json:"name"`
+				} `json:"targets"`
+				Products []struct {
+					Name string `json:"name"`
+				} `json:"products"`
 			}
 			if err := json.Unmarshal(data, &pkg); err != nil {
 				t.Fatal(err)

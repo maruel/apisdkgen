@@ -1,4 +1,5 @@
 // Tests for SDK route method generation and scoped URL paths.
+
 package apisdkgen
 
 import (
@@ -24,6 +25,7 @@ func TestWriteRouteTSJSONMethod(t *testing.T) {
 		Only  bool `json:"unread_only" query:"unread_only"`
 	}
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		for _, tc := range []struct {
 			name   string
 			route  apispec.Route
@@ -64,6 +66,7 @@ func TestRouteClientScope(t *testing.T) {
 		{"prefix boundary", "/api/v1/workspaces/{wsID}extra", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := routeClientScope(scopes, tc.path); got != tc.want {
 				t.Fatalf("routeClientScope() = %v, want %v", got, tc.want)
 			}

@@ -125,6 +125,8 @@ func walkSDKTypes[C ~string](c *apispec.Config[C], seeds []reflect.Type) ([]refl
 				if err := walk(t.Elem()); err != nil {
 					return err
 				}
+			default:
+				// Other types have no nested SDK types to discover.
 			}
 			if t.Name() != "" && isSDKPkg(c, t.PkgPath()) {
 				order = append(order, t)
@@ -363,6 +365,8 @@ func validateSDKCycles[C ~string](c *apispec.Config[C], types []reflect.Type, ou
 				if err := aliasesWalk(t.Elem()); err != nil {
 					return err
 				}
+			default:
+				// Other types cannot contain a recursive container alias.
 			}
 			state[t] = sdkVisitComplete
 			return nil

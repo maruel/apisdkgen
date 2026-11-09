@@ -4,28 +4,76 @@ run:
   tests: true
 linters:
   enable:
+    - asasalint
     - asciicheck
+    - bidichk
     - bodyclose
+    - canonicalheader
     - commentcheck
+    - contextcheck
     - copyloopvar
+    - dupl
+    - dupword
     - durationcheck
+    - embeddedstructfieldcheck
     - errcheck
+    - errchkjson
+    - errname
     - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forcetypeassert
+    - funcorder
+    - gocheckcompilerdirectives
+    - gochecksumtype
     - gocritic
+    - godoclint
+    - godot
+    - gomoddirectives
+    - goprintffuncname
     - gosec
+    - gosmopolitan
+    - grouper
+    - iface
+    - importas
+    - inamedparam
     - ineffassign
+    - intrange
+    - iotamixing
+    - loggercheck
+    - makezero
     - methodfilecheck
-    - misspell
+    - mirror
+    - modernize
+    - musttag
+    - nakedret
     - nilerr
+    - nilnesserr
     - nilnil
+    - noctx
     - nolintlint
+    - nosprintfhostport
+    - perfsprint
     - prealloc
+    - predeclared
+    - reassign
+    - recvcheck
     - revive
+    - sloglint
+    - sqlclosecheck
     - staticcheck
+    - tparallel
     - unconvert
+    - unparam
     - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
     - whitespace
   settings:
+    exhaustive:
+      default-signifies-exhaustive: true
     custom:
       commentcheck:
         type: module
@@ -42,6 +90,9 @@ linters:
   exclusions:
     generated: lax
     rules:
+      # Generated-client tests deliberately exercise Unicode query values.
+      - path: '^(apisdkgen|docregistry)_test\.go$'
+        linters: [gosmopolitan]
       - path: (.+)\.go$
         text: should have a package comment
 formatters:

@@ -30,7 +30,7 @@ type outputPaths struct {
 // validate checks emitter requirements after Config.Validate succeeds.
 func (o *outputPaths) validate[C ~string](cfg *apispec.Config[C]) error {
 	if o.KotlinDir != "" {
-		for _, part := range strings.Split(cfg.KotlinPackage, ".") {
+		for part := range strings.SplitSeq(cfg.KotlinPackage, ".") {
 			if !isIdentifier(part) {
 				return fmt.Errorf("KotlinPackage %q must be a nonempty dotted package name", cfg.KotlinPackage)
 			}

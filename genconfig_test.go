@@ -88,10 +88,12 @@ type testJSONDiamondRight struct{ testJSONDiamondLeaf }
 type testJSONDiamond struct {
 	testJSONDiamondLeft
 	testJSONDiamondRight
+
 	Name string `json:"name"`
 }
 type testJSONRecovered struct {
 	testJSONDiamond
+
 	Value string `json:"value"`
 }
 type testJSONUntagged struct{ Value int }
@@ -106,6 +108,7 @@ type testJSONTagWins struct {
 func TestSDKTypeDiscovery(t *testing.T) {
 	t.Parallel()
 	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
 		cases := []struct {
 			name    string
 			seed    reflect.Type
@@ -183,6 +186,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}
 	})
 	t.Run("error", func(t *testing.T) {
+		t.Parallel()
 		for _, tc := range []struct {
 			name   string
 			seed   reflect.Type
@@ -219,6 +223,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}
 	})
 	t.Run("unconfigured recursive container", func(t *testing.T) {
+		t.Parallel()
 		cfg := discoveryConfig(reflect.TypeFor[testRecursiveMap]())
 		cfg.SDKPackagePaths = nil
 		api := newDiscoveryAPI("TypeScript", filepath.Join(t.TempDir(), "sdk"), cfg)
@@ -228,6 +233,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}
 	})
 	t.Run("validator helper name", func(t *testing.T) {
+		t.Parallel()
 		cfg := discoveryConfig(reflect.TypeFor[ValidatorInput]())
 		cfg.Routes[0].IsSSE = true
 		api := newDiscoveryAPI("TypeScript", filepath.Join(t.TempDir(), "sdk"), cfg)
@@ -237,6 +243,7 @@ func TestSDKTypeDiscovery(t *testing.T) {
 		}
 	})
 	t.Run("generated enum members", func(t *testing.T) {
+		t.Parallel()
 		for _, tc := range []struct {
 			name, target string
 			codes        []apispec.ErrorCodeSpec[testGeneratedErrorCode]
@@ -271,6 +278,7 @@ func TestJSONFieldDominance(t *testing.T) {
 		{"tagged wins", testJSONTagWins{testJSONUntagged{Value: 42}, testJSONTagged{Tagged: "selected"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			data, err := json.Marshal(tc.value)
 			if err != nil {
 				t.Fatal(err)
