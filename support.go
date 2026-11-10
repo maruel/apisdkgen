@@ -86,7 +86,7 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 	}
 
 	// Pass 1: collect struct types and string alias declarations.
-	stringAliases := map[string]string{} // type name → source file
+	stringAliases := map[string]struct{}{}
 	for _, file := range files {
 		for _, decl := range file.Decls {
 			genDecl, ok := decl.(*ast.GenDecl)
@@ -131,7 +131,7 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 				case *ast.Ident:
 					if t.Name == "string" {
 						fn := filepath.Base(fset.Position(typeSpec.Pos()).Filename)
-						stringAliases[typeSpec.Name.Name] = fn
+						stringAliases[typeSpec.Name.Name] = struct{}{}
 						reg.typeFile[typeSpec.Name.Name] = fn
 						var doc string
 						if typeSpec.Doc != nil {
@@ -213,10 +213,8 @@ func loadDocsInDir[C ~string](dir string, cfg *apispec.Config[C]) (*docRegistry[
 		if _, ok := needed[name]; !ok {
 			continue
 		}
-		file := stringAliases[name]
 		reg.aliases = append(reg.aliases, aliasInfo{
 			name:      name,
-			file:      file,
 			constants: aliasConsts[name],
 		})
 	}
@@ -259,7 +257,7 @@ func (v *stringConstValue) mergeType(other stringConstValue) error {
 }
 
 type stringConstResolver struct {
-	aliases      map[string]string
+	aliases      map[string]struct{}
 	declarations map[string]stringConstDecl
 	values       map[string]stringConstValue
 	active       map[string]struct{}
@@ -487,7 +485,6 @@ func formatSwiftDoc(doc, indent string) string {
 // extracted from Go source files by loadDocs.
 type aliasInfo struct {
 	name      string          // e.g. "Harness"
-	file      string          // source filename, e.g. "types.go"
 	constants []aliasConstant // enum values
 }
 

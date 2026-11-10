@@ -489,6 +489,31 @@ func TestGoTypeToDoc(t *testing.T) {
 	}
 }
 
+func TestTypeScriptTypesIgnoreSourceFilename(t *testing.T) {
+	t.Parallel()
+	var outputs [2]string
+	for i, name := range []string{"events.go", "types.go"} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("package fixture\ntype testEnvelope struct{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{reflect.TypeFor[testEnvelope]().PkgPath(): {}}, ExtraSeeds: []reflect.Type{reflect.TypeFor[testEnvelope]()}}
+		api := NewAPI(filepath.Join(dir, "sdk"), "FixtureSDK", NewVersion("v1", dir, cfg))
+		api.Languages = []Language{TypeScript}
+		if err := api.Generate(); err != nil {
+			t.Fatal(err)
+		}
+		data, err := fs.ReadFile(os.DirFS(dir), "sdk/ts/v1/types.gen.ts")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs[i] = string(data)
+	}
+	if diff := cmp.Diff(outputs[0], outputs[1]); diff != "" {
+		t.Fatalf("source filename changed TypeScript output (-events.go +types.go):\n%s", diff)
+	}
+}
+
 func TestLoadDocsInDir(t *testing.T) {
 	t.Parallel()
 	cfg := apispec.Config[string]{

@@ -1206,49 +1206,7 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) err
 		return err
 	}
 
-	// Names have already been checked at preparation. Discovery provides each
-	// declaration once, so section placement is a schedule, not emission state.
-	hasEvents := slices.ContainsFunc(allStructs, func(t sdkType) bool { return t.comment == "events.go" })
-
-	// Emit events.go section with its type aliases first.
-	if hasEvents {
-		b.WriteString("\n//////////\n")
-		b.WriteString("// source: events.go\n")
-		b.WriteString("/*\n")
-		b.WriteString("SSE event types sent to the frontend for task event streams.\n")
-		b.WriteString("*/\n")
-
-		for i := range d.aliases {
-			a := &d.aliases[i]
-			if a.file != "events.go" {
-				continue
-			}
-			b.WriteString("\n")
-			emitTSAlias(&b, *a, a.name == d.errorCodeTypeName())
-		}
-
-		// Then structs in walk order, filtered to events.go.
-		for _, ks := range allStructs {
-			name := ks.Type.Name()
-			if ks.comment != "events.go" {
-				continue
-			}
-			b.WriteString("\n")
-			if err := d.emitTSStruct(&b, ks.Type); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
-			}
-		}
-	}
-
-	// Emit types.go section.
-	b.WriteString("\n\n//////////\n")
-	b.WriteString("// source: types.go\n")
-
-	// Type aliases from types.go (all non-events aliases).
 	for _, a := range d.aliases {
-		if hasEvents && a.file == "events.go" {
-			continue
-		}
 		b.WriteString("\n")
 		emitTSAlias(&b, a, a.name == d.errorCodeTypeName())
 	}
@@ -1286,12 +1244,9 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) err
 		}
 	}
 
-	// Structs from types.go (and any ungrouped) in discovery order.
+	// Emit structs in discovery order.
 	for _, ks := range allStructs {
 		name := ks.Type.Name()
-		if hasEvents && ks.comment == "events.go" {
-			continue
-		}
 		b.WriteString("\n")
 		if err := d.emitTSStruct(&b, ks.Type); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
