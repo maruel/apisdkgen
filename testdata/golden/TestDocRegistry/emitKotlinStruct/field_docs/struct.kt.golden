@@ -3,5 +3,5 @@ data class testKotlinDocumentedFields(
     /** Name is the display name. */
     val name: String,
     /** ID is optional. */
-    val id: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER) val id: String? = null,
 )

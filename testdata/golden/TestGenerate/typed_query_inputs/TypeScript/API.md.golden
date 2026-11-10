@@ -8,15 +8,91 @@ Type notation: `JSONValue` means any valid JSON value.
 
 | Method | Path | Description | Request | Response |
 |--------|------|-------------|---------|----------|
-| GET | `/items/{queryPath}` |  | Query: `testQueryInput` | `testSDKEvent` |
-| POST | `/items` |  | `testSDKEvent`<br>Query: `testQueryInput` | `testSDKEvent` |
+| GET | `/items/{queryPath}` |  | Query: `testQueryInputQuery` | `testSDKEvent` |
+| POST | `/items` |  | `testSDKEvent`<br>Query: `testQueryInputQuery` | `testSDKEvent` |
+
+## Reuse
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/reuse` |  | `testQueryInput`<br>Query: `testQueryInputQuery` | `testSDKEvent` |
+
+## Root-list
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/root-list` |  | `testRootList \| null` | `testRootList \| null` |
+
+## Root-map
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/root-map` |  | `testRootMap \| null` | `testRootMap \| null` |
+
+## Root-bytes
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/root-bytes` |  | `testRootBytes \| null` | `testRootBytes \| null` |
+
+## Root-bytes-headers
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| GET | `/root-bytes-headers` |  |  | `testRootBytes \| null` |
+
+## Query-only-empty
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| GET | `/query-only-empty` |  | Query: `testStructOnlyQueryQuery` | `testSDKEvent` |
+
+## Query-only-value
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| GET | `/query-only-value` |  | Query: `testStructOnlyQueryQuery` | `testSDKEvent` |
+
+## Root-nested
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/root-nested` |  | `testRootNestedBytes \| null` | `testRootNestedBytes \| null` |
+
+## Root-bytes-map
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| POST | `/root-bytes-map` |  | `testRootBytesMap \| null` | `testRootBytesMap \| null` |
+
+## Root-array
+
+| Method | Path | Description | Request | Response |
+|--------|------|-------------|---------|----------|
+| GET | `/root-array` |  |  | `testSDKEvent[] \| null` |
 
 ## Events
 
 | Method | Path | Description | Request | Response |
 |--------|------|-------------|---------|----------|
-|  | `/events` |  | Query: `testQueryInput` | `testSDKEvent` SSE |
-|  | `/events` |  | Query: `testQueryInput` | `testSDKEvent` SSE<br>Named events: `ready` |
+|  | `/events` |  | Query: `testQueryInputQuery` | `testSDKEvent` SSE |
+|  | `/events` |  | Query: `testQueryInputQuery` | `testSDKEvent` SSE<br>Named events: `ready` |
+
+### testQueryInputQuery parameters
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `limit` | `int` |  |
+| `unread_only` | `boolean` |  |
+| `q` | `string` |  |
+| `ids` | `string` |  |
+| `maybe` | `string` |  |
+
+### testStructOnlyQueryQuery parameters
+
+| Parameter | Type | Required |
+|-----------|------|----------|
+| `since` | `string` |  |
 
 ## Errors
 
@@ -38,10 +114,10 @@ All errors return:
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
-| `limit` | `int` | Query parameter: `limit`. |  |
-| `unread` | `boolean` | Query parameter: `unread_only`. |  |
-| `text` | `string` | Query parameter: `q`. |  |
-| `ids` | `string` | Query parameter: `ids`. |  |
+| `limit` | `int \| null` | Query parameter: `limit`. | yes |
+| `unread` | `boolean \| null` | Query parameter: `unread_only`. | yes |
+| `text` | `string \| null` | Query parameter: `q`. | yes |
+| `ids` | `string \| null` | Query parameter: `ids`. | yes |
 | `maybe` | `string` | Query parameter: `maybe`. |  |
 | `extra` | `string` |  | yes |
 
@@ -51,3 +127,29 @@ All errors return:
 |-------|------|-------------|----------|
 | `kind` | `string` |  | yes |
 | `text` | `string` |  |  |
+
+### testRootList
+
+`type testRootList = int[]`
+
+### testRootMap
+
+`type testRootMap = Record<string, int>`
+
+### testRootBytes
+
+`type testRootBytes = base64 string`
+
+### testStructOnlyQuery
+
+| Field | Type | Description | Required |
+|-------|------|-------------|----------|
+| `since` | `string` | Query parameter: `since`. | yes |
+
+### testRootNestedBytes
+
+`type testRootNestedBytes = (base64 string | null)[]`
+
+### testRootBytesMap
+
+`type testRootBytesMap = Record<string, (base64 string | null)>`

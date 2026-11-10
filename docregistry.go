@@ -4,6 +4,8 @@ package apisdkgen
 
 import (
 	"cmp"
+	"encoding"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -124,6 +126,14 @@ func (d *docRegistry[C]) discoverSSEStructs() ([]sdkType, error) {
 		return nil, err
 	}
 	order = slices.DeleteFunc(order, func(t reflect.Type) bool { return t.Kind() != reflect.Struct })
+	for _, t := range seeds {
+		if special := lookupSpecial(d.cfg, t); special != nil && special.TSSource != "" && !slices.Contains(order, t) {
+			if special.TSValidate == "" {
+				return nil, fmt.Errorf("SSE type %s requires TSValidate", t)
+			}
+			order = append(order, t)
+		}
+	}
 	result := make([]sdkType, len(order))
 	for i, t := range order {
 		result[i] = sdkType{Type: t}
@@ -169,6 +179,10 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.serializer
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -214,11 +228,9 @@ class ApiClient(
     }
 `)
 	}
-	if d.cfg.MCPProtocolVersion != "" {
-		b.WriteString("    private val mcpID = java.util.concurrent.atomic.AtomicInteger(0)\n")
-	}
+
 	b.WriteString(`
-    private suspend inline fun <reified T> request(method: String, path: String, body: String? = null, headers: Map<String, String> = emptyMap()): T {
+    private suspend inline fun <reified T> request(method: String, path: String, body: String? = null, headers: Map<String, String> = emptyMap(), crossinline decode: (String) -> T = { json.decodeFromString<T>(it) }): T {
         val url = "$baseURL$path"
         val needsBody = method in listOf("POST", "PUT", "PATCH")
         val requestBody = body?.toRequestBody(jsonMediaType)
@@ -255,7 +267,7 @@ class ApiClient(
 	b.WriteString(`                                }
                                 throw failure
                             }
-                            json.decodeFromString<T>(responseBody)
+                            decode(responseBody)
                         }
                     } catch (e: Exception) {
                         cont.resumeWithException(e)
@@ -281,63 +293,9 @@ class ApiClient(
 		if err != nil {
 			return err
 		}
-		writeRouteKotlinJSONFunc(r, &b, params, fields)
+		writeRouteKotlinJSONFunc(d, r, &b, params, fields)
 	}
 	b.WriteString("\n")
-
-	if d.cfg.MCPProtocolVersion != "" {
-		fmt.Fprintf(&b, `    /** Discovers server metadata, capabilities, and instructions. */
-    suspend fun serverDiscover(headers: Map<String, String> = emptyMap()): ServerDiscoverResult {
-        val response = mcp(
-            req = JSONRPCRequest(
-                jsonrpc = "2.0",
-                id = kotlinx.serialization.json.JsonPrimitive(mcpID.incrementAndGet()),
-                method = Method.ServerDiscover,
-                params = mcpMetaParams(),
-            ),
-            headers = mcpHeaders(Method.ServerDiscover, headers),
-        )
-        response.error?.let { error(it.message) }
-        val result = response.result ?: error("Missing result in MCP response")
-        return json.decodeFromString(ServerDiscoverResult.serializer(), result.toString())
-    }
-
-    /** Returns server instructions, or an empty string when none are advertised. */
-    suspend fun serverInstructions(headers: Map<String, String> = emptyMap()): String =
-        serverDiscover(headers).instructions.orEmpty()
-
-    private fun mcpHeaders(method: Method, headers: Map<String, String>): Map<String, String> = buildMap {
-        put("Mcp-Protocol-Version", %[1]q)
-        put("Mcp-Method", method.value)
-        putAll(headers)
-    }
-
-    private fun mcpMetaParams(): kotlinx.serialization.json.JsonObject {
-        val clientInfo = kotlinx.serialization.json.JsonObject(mapOf(
-            "name" to kotlinx.serialization.json.JsonPrimitive("mcp-kotlin-sdk"),
-            "version" to kotlinx.serialization.json.JsonPrimitive("1.0.0"),
-        ))
-        val meta = kotlinx.serialization.json.JsonObject(mapOf(
-            "io.modelcontextprotocol/protocolVersion" to kotlinx.serialization.json.JsonPrimitive(%[1]q),
-            "io.modelcontextprotocol/clientInfo" to clientInfo,
-            "io.modelcontextprotocol/clientCapabilities" to kotlinx.serialization.json.JsonObject(emptyMap()),
-        ))
-        return kotlinx.serialization.json.JsonObject(mapOf("_meta" to meta))
-    }
-
-    /** Opens a POST-based MCP subscription stream. */
-    fun subscriptionsListen(
-        req: JSONRPCRequest,
-        headers: Map<String, String> = emptyMap(),
-    ): Flow<JSONRPCNotification> = sseFlow(
-        method = "POST",
-        path = "",
-        body = json.encodeToString(req),
-        headers = headers,
-    )
-
-`, d.cfg.MCPProtocolVersion)
-	}
 
 	// Generate SSE endpoint methods from routes.
 	b.WriteString("    // SSE endpoints\n")
@@ -356,18 +314,17 @@ class ApiClient(
 	b.WriteString("\n")
 
 	// sseFlow helper and reconnecting wrappers.
-	b.WriteString(`    private inline fun <reified T> sseFlow(
-        path: String,
-        method: String = "GET",
-        body: String? = null,
-        headers: Map<String, String> = emptyMap(),
-    ): Flow<T> = callbackFlow {
+	b.WriteString(`    private inline fun <reified T> sseFlow(path: String): Flow<T> = stream(path) { json.decodeFromString<T>(it) }
+
+    /** Opens a cold event stream, decoding each data frame with the supplied function. */
+    fun <T> stream(path: String, method: String = "GET", body: String? = null, headers: Map<String, String> = emptyMap(), decode: (String) -> T): Flow<T> = callbackFlow {
         val requestBody = body?.toRequestBody(jsonMediaType)
+            ?: if (method in listOf("PATCH", "POST", "PROPPATCH", "PUT", "REPORT")) "".toRequestBody(null) else null
         val request = Request.Builder()
             .url("$baseURL$path")
             .header("Accept", "text/event-stream")
             .apply {
-                if (requestBody != null) header("Content-Type", "application/json")
+                if (body != null) header("Content-Type", "application/json")
                 headers.forEach { (name, value) -> header(name, value) }
                 tokenProvider?.invoke()?.let { header("Authorization", "Bearer $it") }
             }
@@ -377,7 +334,7 @@ class ApiClient(
         val source = factory.newEventSource(request, object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 try {
-                    val event = json.decodeFromString<T>(data)
+                    val event = decode(data)
                     // OkHttp invokes this on an IO callback thread; suspend reads until delivery.
                     trySendBlocking(event).getOrThrow()
                 } catch (e: Exception) {
@@ -1021,14 +978,111 @@ func (d *docRegistry[C]) discoverTSStructs() ([]sdkType, error) {
 	return result, nil
 }
 
+// jsonByteSlice follows encoding/json's base64 slice special case.
+func jsonByteSlice(t reflect.Type) bool {
+	if t.Kind() != reflect.Slice || t.Elem().Kind() != reflect.Uint8 {
+		return false
+	}
+	p := reflect.PointerTo(t.Elem())
+	return !p.Implements(reflect.TypeFor[json.Marshaler]()) && !p.Implements(reflect.TypeFor[encoding.TextMarshaler]())
+}
+
+// jsonOmittable matches encoding/json's field omission rules. A struct with
+// omitempty is never empty; omitzero uses the zero value or IsZero method.
+func jsonOmittable(t reflect.Type, opts []string) bool {
+	if slices.Contains(opts, "omitzero") {
+		return true
+	}
+	if !slices.Contains(opts, "omitempty") {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Array:
+		return t.Len() == 0
+	case reflect.Map, reflect.Slice, reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Interface, reflect.Pointer:
+		return true
+	default:
+		return false
+	}
+}
+
+// jsonNilable reports whether the Go value can encode as JSON null.
+func jsonNilable(t reflect.Type) bool {
+	// Only these kinds can have a nil JSON representation.
+	//nolint:exhaustive // All other reflect kinds are non-nilable.
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
+		return true
+	}
+	return false
+}
+
+// jsonThreeState reports fields that can be omitted, present as null, or
+// present as another value. Custom marshalers and IsZero methods may retain
+// null even when the field's own zero value is usually omitted.
+func jsonThreeState[C ~string](cfg *apispec.Config[C], t reflect.Type, opts []string) bool {
+	if !jsonOmittable(t, opts) {
+		return false
+	}
+	if t.Kind() == reflect.Interface {
+		return true
+	}
+	if t.Kind() == reflect.Pointer && jsonNilable(t.Elem()) {
+		return true
+	}
+	if (t.Kind() == reflect.Map || t.Kind() == reflect.Slice) && slices.Contains(opts, "omitzero") && !slices.Contains(opts, "omitempty") {
+		z := reflect.TypeFor[interface{ IsZero() bool }]()
+		if t.Implements(z) || reflect.PointerTo(t).Implements(z) {
+			return true
+		}
+	}
+	base := t
+	for base.Kind() == reflect.Pointer {
+		base = base.Elem()
+	}
+	if special := lookupSpecial(cfg, base); special != nil &&
+		(t.Implements(reflect.TypeFor[json.Marshaler]()) || base.Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(base).Implements(reflect.TypeFor[json.Marshaler]())) {
+		// A mapping that admits arbitrary JSON can explicitly encode null even
+		// when the enclosing Go pointer is non-nil.
+		return strings.Contains(special.TSType, "null") || strings.HasPrefix(special.TSType, "any") || strings.HasPrefix(special.TSType, "unknown") || special.SwiftType == "JSONValue" || special.KTType == "JsonElement"
+	}
+	return false
+}
+
 // goTypeToTS maps a Go reflect.Type to its TypeScript type string.
 func (d *docRegistry[C]) goTypeToTS(t reflect.Type) (string, error) {
+	return d.goTypeToTSValue(t, true)
+}
+
+// goTypeToTSValue maps nilable values to a null union unless a containing
+// field's omission rule suppresses that value before encoding.
+func (d *docRegistry[C]) goTypeToTSValue(t reflect.Type, nullable bool) (string, error) {
 	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
+		inner, err := d.goTypeToTSValue(t.Elem(), true)
+		if err != nil {
+			return "", err
+		}
+		if nullable && !strings.HasSuffix(inner, " | null") {
+			inner += " | null"
+		}
+		return inner, nil
+	}
+	if nullable && (t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		inner, err := d.goTypeToTSValue(t, false)
+		if err != nil {
+			return "", err
+		}
+		return inner + " | null", nil
 	}
 
 	if m := lookupSpecial(d.cfg, t); m != nil {
 		return m.TSType, nil
+	}
+	if jsonByteSlice(t) {
+		return "string", nil
 	}
 	switch t {
 	case reflect.TypeFor[map[string]bool]():
@@ -1063,6 +1117,9 @@ func (d *docRegistry[C]) goTypeToTS(t reflect.Type) (string, error) {
 		e, err := d.goTypeToTS(t.Elem())
 		if err != nil {
 			return "", err
+		}
+		if strings.Contains(e, " | ") {
+			e = "(" + e + ")"
 		}
 		return e + "[]", nil
 	case reflect.Map:
@@ -1102,10 +1159,8 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		omit := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
-		isPtr := sf.Type.Kind() == reflect.Pointer
-		optional := isPtr || (omit && !isPtr)
-		tsType, err := d.goTypeToTS(sf.Type)
+		optional := jsonOmittable(sf.Type, opts)
+		tsType, err := d.goTypeToTSValue(sf.Type, !optional || jsonThreeState(d.cfg, sf.Type, opts))
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
@@ -1138,6 +1193,11 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) error {
 	var b strings.Builder
 	b.WriteString("// Code generated by gen-api-sdk. DO NOT EDIT.\n")
+	for _, special := range d.cfg.SpecialTypes {
+		if special.TSSource != "" {
+			fmt.Fprintf(&b, "import type { %s } from \"./custom.%s.gen\";\nexport type { %s } from \"./custom.%s.gen\";\n", special.TSType, special.Type.Name(), special.TSType, special.Type.Name())
+		}
+	}
 	b.WriteString("/** ISO 8601 timestamp string (e.g. \"2026-04-13T12:00:00Z\"). */\n")
 	b.WriteString("export type ISOTimestamp = string & { readonly __brand: \"ISOTimestamp\" };\n")
 
@@ -1204,6 +1264,10 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) err
 		if doc := d.typeDoc[name]; doc != "" {
 			b.WriteString(formatBlockDoc(doc, ""))
 		}
+		if jsonByteSlice(ns) {
+			fmt.Fprintf(&b, "export type %s = string;\n", name)
+			continue
+		}
 		elemType, err := d.goTypeToTS(ns.Elem())
 		if err != nil {
 			return fmt.Errorf("%s: %w", name, err)
@@ -1215,6 +1279,9 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) err
 			}
 			fmt.Fprintf(&b, "export type %s = { [key: %s]: %s };\n", name, key, elemType)
 		} else {
+			if strings.Contains(elemType, " | ") {
+				elemType = "(" + elemType + ")"
+			}
 			fmt.Fprintf(&b, "export type %s = %s[];\n", name, elemType)
 		}
 	}
@@ -1234,41 +1301,59 @@ func (d *docRegistry[C]) generateTSTypes(outDir string, out *preparedOutput) err
 	return out.write(filepath.Join(outDir, "types.gen.ts"), b.String())
 }
 
-// tsFieldValidator returns a TypeScript expression that validates a value
-// at the given pathExpr. pathLit is a string literal for error messages.
+// tsFieldValidator validates JSON values, preserving null for nilable types.
 func (d *docRegistry[C]) tsFieldValidator(t reflect.Type, pathExpr, pathLit string) (string, error) {
-	if t.Kind() == reflect.Pointer {
-		return d.tsFieldValidator(t.Elem(), pathExpr, pathLit)
-	}
-	if m := lookupSpecial(d.cfg, t); m != nil && m.TSValidate != "" {
-		return fmt.Sprintf(m.TSValidate, pathExpr, pathLit), nil
-	}
-	if t.Kind() == reflect.Slice {
-		elemFn, err := tsElemValidatorFunc(d.cfg, t.Elem(), pathLit+"[i]")
-		if err != nil {
-			return "", err
-		}
-		elemTS, err := d.goTypeToTS(t.Elem())
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("validateArray(%s, %q, %s) as %s[]", pathExpr, pathLit, elemFn, elemTS), nil
-	}
+	return d.tsFieldValueValidator(t, pathExpr, pathLit, true)
+}
 
-	if t.Kind() == reflect.Map {
-		valFn, err := tsElemValidatorFunc(d.cfg, t.Elem(), pathLit+"[k]")
+func (d *docRegistry[C]) tsFieldValueValidator(t reflect.Type, pathExpr, pathLit string, nullable bool) (string, error) {
+	return d.tsFieldValueValidatorSeen(t, pathExpr, pathLit, nullable, map[reflect.Type]struct{}{})
+}
+
+func (d *docRegistry[C]) tsFieldValueValidatorSeen(t reflect.Type, pathExpr, pathLit string, nullable bool, active map[reflect.Type]struct{}) (string, error) {
+	if t.Kind() == reflect.Pointer {
+		inner, err := d.tsFieldValueValidatorSeen(t.Elem(), pathExpr, pathLit, true, active)
 		if err != nil {
 			return "", err
 		}
-		keyTS, err := d.goTypeToTS(t.Key())
+		if nullable {
+			return fmt.Sprintf("(%s === null ? null : %s)", pathExpr, inner), nil
+		}
+		return inner, nil
+	}
+	if nullable && (t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		inner, err := d.tsFieldValueValidatorSeen(t, pathExpr, pathLit, false, active)
 		if err != nil {
 			return "", err
 		}
-		valTS, err := d.goTypeToTS(t.Elem())
+		return fmt.Sprintf("(%s === null ? null : %s)", pathExpr, inner), nil
+	}
+	if m := lookupSpecial(d.cfg, t); m != nil {
+		if m.TSValidate != "" {
+			return fmt.Sprintf(m.TSValidate, pathExpr, pathLit), nil
+		}
+		if m.TSSource != "" {
+			return "", fmt.Errorf("SSE type %s requires TSValidate", t)
+		}
+	}
+	if jsonByteSlice(t) {
+		return fmt.Sprintf("asString(%s, %q)", pathExpr, pathLit), nil
+	}
+	if t.Kind() == reflect.Slice || t.Kind() == reflect.Map {
+		if _, ok := active[t]; ok {
+			return "", fmt.Errorf("recursive SSE container %s is unsupported", t)
+		}
+		active[t] = struct{}{}
+		defer delete(active, t)
+		inner, err := d.tsFieldValueValidatorSeen(t.Elem(), "v", pathLit+"[element]", true, active)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("validateRecord(%s, %q, %s) as { [key: %s]: %s }", pathExpr, pathLit, valFn, keyTS, valTS), nil
+		fn := "(v) => " + inner
+		if t.Kind() == reflect.Slice {
+			return fmt.Sprintf("validateArray(%s, %q, %s)", pathExpr, pathLit, fn), nil
+		}
+		return fmt.Sprintf("validateRecord(%s, %q, %s)", pathExpr, pathLit, fn), nil
 	}
 	if t.Kind() == reflect.Struct && isSDKPkg(d.cfg, t.PkgPath()) {
 		return fmt.Sprintf("validate%s(%s)", t.Name(), pathExpr), nil
@@ -1281,16 +1366,6 @@ func (d *docRegistry[C]) tsFieldValidator(t reflect.Type, pathExpr, pathLit stri
 		return fmt.Sprintf("(%s as %s)", expr, t.Name()), nil
 	}
 	return expr, nil
-}
-
-// tsFieldOptValidator is like tsFieldValidator but wraps the result to
-// return undefined when the value is null/undefined.
-func (d *docRegistry[C]) tsFieldOptValidator(t reflect.Type, pathExpr, pathLit string) (string, error) {
-	inner, err := d.tsFieldValidator(t, pathExpr, pathLit)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("(%s === undefined || %s === null ? undefined : %s)", pathExpr, pathExpr, inner), nil
 }
 
 // emitTSDiscriminator writes a discriminated union validator with a kind-based
@@ -1332,7 +1407,8 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 	if kindExpr == "" {
 		kindExpr = "asString(obj[\"kind\"], \"" + name + ".kind\")"
 	}
-	baseFields := []tsFieldBinding{{"kind", kindExpr}}
+	b.WriteString("  if (!Object.prototype.hasOwnProperty.call(obj, \"kind\")) throw new TypeError(\"missing required field: kind\");\n")
+	baseFields := []tsFieldBinding{{jsonName: "kind", expr: kindExpr}}
 	var variantFields []tsFieldBinding
 
 	for _, f := range fields {
@@ -1344,8 +1420,7 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 		if jsonName == "kind" {
 			continue
 		}
-		omit := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
-		isPtr := sf.Type.Kind() == reflect.Pointer
+		omit := jsonOmittable(sf.Type, opts)
 		pathExpr := fmt.Sprintf("obj[%q]", jsonName)
 		pathLit := fmt.Sprintf("%s.%s", name, jsonName)
 
@@ -1353,30 +1428,42 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
-		if (!omit && !isPtr) || (len(kinds) != 0 && !slices.Contains(kinds, jsonName)) {
+		if !omit || (len(kinds) != 0 && !slices.Contains(kinds, jsonName)) {
+			if !omit {
+				fmt.Fprintf(b, "  if (!Object.prototype.hasOwnProperty.call(obj, %q)) throw new TypeError(%q);\n", jsonName, "missing required field: "+pathLit)
+			}
 			// Common metadata keeps its declared optionality.
-			if omit || isPtr {
-				expr, err = d.tsFieldOptValidator(sf.Type, pathExpr, pathLit)
+			if omit {
+				expr, err = d.tsFieldValueValidator(sf.Type, pathExpr, pathLit, jsonThreeState(d.cfg, sf.Type, opts))
 				if err != nil {
 					return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 				}
 			}
-			baseFields = append(baseFields, tsFieldBinding{jsonName, expr})
+			baseFields = append(baseFields, tsFieldBinding{jsonName: jsonName, expr: expr, optional: omit})
 		} else {
+			expr, err = d.tsFieldValueValidator(sf.Type, pathExpr, pathLit, jsonThreeState(d.cfg, sf.Type, opts))
+			if err != nil {
+				return fmt.Errorf("%s.%s: %w", name, jsonName, err)
+			}
 			// Variant field: extracted in the switch.
-			variantFields = append(variantFields, tsFieldBinding{jsonName, expr})
+			variantFields = append(variantFields, tsFieldBinding{jsonName: jsonName, expr: expr})
 		}
 	}
 
 	b.WriteString("  const result: " + name + " = {\n")
 	for _, bf := range baseFields {
-		fmt.Fprintf(b, "    %s: %s,\n", tsObjectKey(bf.jsonName), bf.expr)
+		if bf.optional {
+			fmt.Fprintf(b, "    ...(Object.prototype.hasOwnProperty.call(obj, %q) ? { %s: %s } : {}),\n", bf.jsonName, tsObjectKey(bf.jsonName), bf.expr)
+		} else {
+			fmt.Fprintf(b, "    %s: %s,\n", tsObjectKey(bf.jsonName), bf.expr)
+		}
 	}
 	b.WriteString("  };\n")
 	b.WriteString("  switch (result.kind) {\n")
 	for _, vf := range variantFields {
 		fmt.Fprintf(b, "    case %q:\n", vf.jsonName)
-		fmt.Fprintf(b, "      result%s = %s;\n", tsPropertyAccess(vf.jsonName), vf.expr)
+		fmt.Fprintf(b, "      if (!Object.prototype.hasOwnProperty.call(obj, %q)) throw new TypeError(%q);\n", vf.jsonName, "missing required field: "+name+"."+vf.jsonName)
+		fmt.Fprintf(b, "      Object.defineProperty(result, %q, { value: %s, enumerable: true, writable: true, configurable: true });\n", vf.jsonName, vf.expr)
 		b.WriteString("      break;\n")
 	}
 	b.WriteString("    // Unknown kinds pass through.\n")
@@ -1390,8 +1477,16 @@ func (d *docRegistry[C]) emitTSDiscriminator(b *strings.Builder, t reflect.Type)
 func (d *docRegistry[C]) emitTSValidator(b *strings.Builder, t reflect.Type) error {
 	name := t.Name()
 	fmt.Fprintf(b, "export function validate%s(raw: ValidatorInput): %s {\n", name, name)
+	if special := lookupSpecial(d.cfg, t); special != nil && special.TSSource != "" {
+		if special.TSValidate == "" {
+			return fmt.Errorf("SSE type %s requires TSValidate", t)
+		}
+		fmt.Fprintf(b, "  return %s;\n}\n", fmt.Sprintf(special.TSValidate, "raw", name))
+		return nil
+	}
 	fmt.Fprintf(b, "  const obj = asObject(raw, %q);\n", name)
-	fmt.Fprintf(b, "  return {\n")
+	var entries strings.Builder
+	var required strings.Builder
 
 	fields, err := jsonFields(d.cfg, t)
 	if err != nil {
@@ -1403,25 +1498,33 @@ func (d *docRegistry[C]) emitTSValidator(b *strings.Builder, t reflect.Type) err
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		omit := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
-		isPtr := sf.Type.Kind() == reflect.Pointer
-		optional := isPtr || (omit && !isPtr)
+		optional := jsonOmittable(sf.Type, opts)
 
+		if !optional {
+			fmt.Fprintf(&required, "  if (!Object.prototype.hasOwnProperty.call(obj, %q)) throw new TypeError(%q);\n", jsonName, "missing required field: "+name+"."+jsonName)
+		}
 		pathExpr := fmt.Sprintf("obj[%q]", jsonName)
 		pathLit := fmt.Sprintf("%s.%s", name, jsonName)
 		var expr string
 		var err error
 		if optional {
-			expr, err = d.tsFieldOptValidator(sf.Type, pathExpr, pathLit)
+			expr, err = d.tsFieldValueValidator(sf.Type, pathExpr, pathLit, jsonThreeState(d.cfg, sf.Type, opts))
 		} else {
 			expr, err = d.tsFieldValidator(sf.Type, pathExpr, pathLit)
 		}
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
-		fmt.Fprintf(b, "    %s: %s,\n", tsObjectKey(jsonName), expr)
+		if optional {
+			fmt.Fprintf(&entries, "    ...(Object.prototype.hasOwnProperty.call(obj, %q) ? { %s: %s } : {}),\n", jsonName, tsObjectKey(jsonName), expr)
+		} else {
+			fmt.Fprintf(&entries, "    %s: %s,\n", tsObjectKey(jsonName), expr)
+		}
 	}
 
+	b.WriteString(required.String())
+	b.WriteString("  return {\n")
+	b.WriteString(entries.String())
 	b.WriteString("  };\n")
 	b.WriteString("}\n")
 	return nil
@@ -1450,24 +1553,46 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out *preparedOutput) 
 	b.WriteString("// TypeError on mismatch. Unknown kinds pass through for forward compat.\n\n")
 
 	refTypes := map[string]struct{}{}
+	seenTypes := map[reflect.Type]struct{}{}
+	var collectAliases func(reflect.Type)
+	collectAliases = func(t reflect.Type) {
+		if _, ok := seenTypes[t]; ok {
+			return
+		}
+		seenTypes[t] = struct{}{}
+		if _, ok := d.aliasNames[t.Name()]; ok {
+			refTypes[t.Name()] = struct{}{}
+		}
+		if lookupSpecial(d.cfg, t) != nil {
+			return
+		}
+		switch t.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			collectAliases(t.Elem())
+		default:
+		}
+	}
 	for _, ks := range needed {
 		refTypes[ks.Type.Name()] = struct{}{}
+		if special := lookupSpecial(d.cfg, ks.Type); special != nil && special.TSSource != "" {
+			collectAliases(ks.Type)
+			continue
+		}
 		// Collect alias types used by struct fields (for union type casts).
 		fields, err := jsonFields(d.cfg, ks.Type)
 		if err != nil {
 			return err
 		}
 		for _, field := range fields {
-			ft := field.field.Type
-			if ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
-			}
-			if _, ok := d.aliasNames[ft.Name()]; ok {
-				refTypes[ft.Name()] = struct{}{}
-			}
+			collectAliases(field.field.Type)
 		}
 	}
 	refTypes["ISOTimestamp"] = struct{}{}
+	for _, special := range d.cfg.SpecialTypes {
+		if _, needed := seenTypes[special.Type]; needed && special.TSValidator != "" {
+			fmt.Fprintf(&b, "import { %s } from \"./custom.%s.gen\";\n", special.TSValidator, special.Type.Name())
+		}
+	}
 
 	if len(refTypes) > 0 {
 		sorted := slices.Sorted(maps.Keys(refTypes))
@@ -1522,7 +1647,7 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out *preparedOutput) 
 	b.WriteString("  }\n")
 	b.WriteString("  const result: Record<string, T> = {};\n")
 	b.WriteString("  for (const k of Object.keys(v as ObjectValue)) {\n")
-	b.WriteString("    result[k] = valValidator((v as ObjectValue)[k]);\n")
+	b.WriteString("    Object.defineProperty(result, k, { value: valValidator((v as ObjectValue)[k]), enumerable: true, writable: true, configurable: true });\n")
 	b.WriteString("  }\n")
 	b.WriteString("  return result;\n")
 	b.WriteString("}\n")
@@ -1537,7 +1662,9 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out *preparedOutput) 
 	for _, ks := range needed {
 		name := ks.Type.Name()
 		b.WriteString("\n")
-		if _, ok := discriminated[name]; ok {
+		_, isDiscriminated := discriminated[name]
+		special := lookupSpecial(d.cfg, ks.Type)
+		if isDiscriminated && (special == nil || special.TSSource == "") {
 			if err := d.emitTSDiscriminator(&b, ks.Type); err != nil {
 				return fmt.Errorf("validate%s: %w", name, err)
 			}
@@ -1554,7 +1681,7 @@ func (d *docRegistry[C]) generateTSValidate(outDir string, out *preparedOutput) 
 // generateTS generates the TypeScript API client as a createApiClient factory.
 func (d *docRegistry[C]) generateTS(outDir string, out *preparedOutput) error {
 	errorModel := clientErrorModel(d.cfg)
-	hasRequest := len(d.cfg.Routes) > 0 || d.cfg.MCPProtocolVersion != ""
+	hasRequest := len(d.cfg.Routes) > 0
 	// Collect all referenced types for the import statement.
 	types := map[string]struct{}{}
 	validators := map[string]struct{}{}
@@ -1583,11 +1710,6 @@ func (d *docRegistry[C]) generateTS(outDir string, out *preparedOutput) error {
 	}
 	if name := d.errorCodeTypeName(); name != "" {
 		types[name] = struct{}{}
-	}
-	if d.cfg.MCPProtocolVersion != "" {
-		for _, name := range []string{"ClientCapabilities", "Implementation", "RequestMeta", "ServerDiscoverResult"} {
-			types[name] = struct{}{}
-		}
 	}
 
 	sorted := slices.Sorted(maps.Keys(types))
@@ -1652,39 +1774,8 @@ func (d *docRegistry[C]) generateTS(outDir string, out *preparedOutput) error {
 	} else {
 		b.WriteString("export function createApiClient(_fetchFn: FetchFn = (globalThis as any).fetch.bind(globalThis)) {\n")
 	}
-	if d.cfg.MCPProtocolVersion != "" {
-		fmt.Fprintf(&b, "  const mcpProtocolVersion = %q;\n", d.cfg.MCPProtocolVersion)
-		b.WriteString(`  let mcpId = 0;
-  const mcpMeta = (): RequestMeta => ({
-    "io.modelcontextprotocol/protocolVersion": mcpProtocolVersion,
-    "io.modelcontextprotocol/clientInfo": { name: "mcp-typescript-sdk", version: "1.0.0" } as Implementation,
-    "io.modelcontextprotocol/clientCapabilities": {} as ClientCapabilities,
-  });
-  const mcpRequest = async <T>(method: string, params: unknown, headers: Record<string, string> = {}): Promise<T> => {
-    const resp = await request<JSONRPCResponse>("POST", "", {
-      jsonrpc: "2.0",
-      id: ++mcpId,
-      method,
-      params,
-    }, {
-      "Mcp-Protocol-Version": mcpProtocolVersion,
-      "Mcp-Method": method,
-      ...headers,
-    });
-    if (resp.error) throw new Error(resp.error.message);
-    return resp.result as T;
-  };
-  const serverDiscover = (headers: Record<string, string> = {}): Promise<ServerDiscoverResult> =>
-    mcpRequest<ServerDiscoverResult>("server/discover", { _meta: mcpMeta() }, headers);
-  const serverInstructions = async (headers: Record<string, string> = {}): Promise<string> =>
-    (await serverDiscover(headers)).instructions ?? "";
-`)
-	}
+
 	b.WriteString("  return {\n")
-	if d.cfg.MCPProtocolVersion != "" {
-		b.WriteString("    serverDiscover,\n")
-		b.WriteString("    serverInstructions,\n")
-	}
 
 	for i := range d.cfg.Routes {
 		r := &d.cfg.Routes[i]
@@ -1748,14 +1839,34 @@ func (d *docRegistry[C]) generateKotlin(outDir string, out *preparedOutput) erro
 }
 
 func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
-	// Unwrap pointer — nullability is handled by the caller.
+	return d.goTypeToKotlinValue(t, false)
+}
+
+func (d *docRegistry[C]) goTypeToKotlinValue(t reflect.Type, nullable bool) (string, error) {
 	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
+		inner, err := d.goTypeToKotlinValue(t.Elem(), true)
+		if err != nil {
+			return "", err
+		}
+		if nullable && !strings.HasSuffix(inner, "?") {
+			inner += "?"
+		}
+		return inner, nil
+	}
+	if nullable && (t.Kind() == reflect.Map || t.Kind() == reflect.Slice) {
+		inner, err := d.goTypeToKotlinValue(t, false)
+		if err != nil {
+			return "", err
+		}
+		return inner + "?", nil
 	}
 
 	// Special cases.
 	if m := lookupSpecial(d.cfg, t); m != nil {
 		return m.KTType, nil
+	}
+	if jsonByteSlice(t) {
+		return "ByteArray", nil
 	}
 
 	// Named string aliases (Harness, EventKind).
@@ -1782,7 +1893,7 @@ func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
 		if isSDKPkg(d.cfg, t.PkgPath()) {
 			return t.Name(), nil // Named slice.
 		}
-		e, err := d.goTypeToKotlin(t.Elem())
+		e, err := d.goTypeToKotlinValue(t.Elem(), true)
 		if err != nil {
 			return "", err
 		}
@@ -1795,7 +1906,7 @@ func (d *docRegistry[C]) goTypeToKotlin(t reflect.Type) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		v, err := d.goTypeToKotlin(t.Elem())
+		v, err := d.goTypeToKotlinValue(t.Elem(), true)
 		if err != nil {
 			return "", err
 		}
@@ -1821,16 +1932,18 @@ func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		omit := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
+		omit := jsonOmittable(sf.Type, opts)
 
 		ft := sf.Type
-		isPtr := ft.Kind() == reflect.Pointer
-
 		ktType, err := d.goTypeToKotlin(ft)
 		if err != nil {
 			return nil, fmt.Errorf("%s.%s: %w", t.Name(), jsonName, err)
 		}
-		nullable := isPtr || (omit && !isPtr)
+		nullable := omit || jsonNilable(ft)
+		if base, ok := strings.CutSuffix(ktType, "?"); ok {
+			ktType = base
+			nullable = true
+		}
 
 		ktName := kotlinPropertyName(sf.Name, jsonName)
 		if !isIdentifier(ktName) {
@@ -1855,6 +1968,8 @@ func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error
 			ktName:     ktName,
 			ktType:     ktType,
 			nullable:   nullable,
+			optional:   omit,
+			presence:   jsonThreeState(d.cfg, ft, opts),
 			serialName: sn,
 			doc:        doc,
 		})
@@ -1864,6 +1979,10 @@ func (d *docRegistry[C]) parseStructFields(t reflect.Type) ([]kotlinField, error
 
 // emitKotlinStruct writes a @Serializable Kotlin DTO class to b.
 func (d *docRegistry[C]) emitKotlinStruct(b *strings.Builder, t reflect.Type) error {
+	return d.emitKotlinStructVariant(b, t, false)
+}
+
+func (d *docRegistry[C]) emitKotlinStructVariant(b *strings.Builder, t reflect.Type, query bool) error {
 	if doc := d.typeDoc[t.Name()]; doc != "" {
 		b.WriteString(formatBlockDoc(doc, ""))
 	}
@@ -1872,6 +1991,19 @@ func (d *docRegistry[C]) emitKotlinStruct(b *strings.Builder, t reflect.Type) er
 		return err
 	}
 	name := t.Name()
+	if query {
+		name += "Query"
+		selected, err := jsonFields(d.cfg, t)
+		if err != nil {
+			return err
+		}
+		for i := range fields {
+			_, opts := parseJSONTag(selected[i].field.Tag.Get("json"))
+			if selected[i].field.Type.Kind() == reflect.Pointer || slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero") {
+				fields[i].nullable, fields[i].optional, fields[i].presence = true, true, false
+			}
+		}
+	}
 
 	if len(fields) == 0 {
 		b.WriteString("@Serializable\n")
@@ -1914,7 +2046,7 @@ func (d *docRegistry[C]) emitKotlinStruct(b *strings.Builder, t reflect.Type) er
 func (d *docRegistry[C]) writeKotlinTypes(outDir string, out *preparedOutput) error {
 	var b strings.Builder
 	b.WriteString("// Code generated by gen-api-sdk. DO NOT EDIT.\n")
-	b.WriteString("@file:UseSerializers(InstantSerializer::class)\n\n")
+	b.WriteString("@file:UseSerializers(InstantSerializer::class, ByteStringSerializer::class)\n@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)\n\n")
 	fmt.Fprintf(&b, "package %s\n\n", d.cfg.KotlinPackage)
 	b.WriteString("import java.time.Instant\n")
 	b.WriteString("import kotlinx.serialization.KSerializer\n")
@@ -1926,6 +2058,40 @@ func (d *docRegistry[C]) writeKotlinTypes(outDir string, out *preparedOutput) er
 	b.WriteString("import kotlinx.serialization.encoding.Decoder\n")
 	b.WriteString("import kotlinx.serialization.encoding.Encoder\n")
 	b.WriteString("import kotlinx.serialization.json.JsonElement\n\n")
+	b.WriteString("import kotlinx.serialization.descriptors.nullable\n")
+	b.WriteString(`
+/** A JSON field that may be omitted, null, or a value. */
+@kotlinx.serialization.Serializable(with = JSONPresenceSerializer::class)
+sealed interface JSONPresence<out T> {
+    data object Missing : JSONPresence<Nothing>
+    data object Null : JSONPresence<Nothing>
+    data class Value<T>(val value: T) : JSONPresence<T>
+}
+
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+class JSONPresenceSerializer<T>(private val valueSerializer: KSerializer<T>) : KSerializer<JSONPresence<T>> {
+    override val descriptor = valueSerializer.descriptor.nullable
+    override fun serialize(encoder: Encoder, value: JSONPresence<T>) {
+        when (value) {
+            JSONPresence.Missing -> error("A missing field must be omitted")
+            JSONPresence.Null -> encoder.encodeNull()
+            is JSONPresence.Value -> valueSerializer.serialize(encoder, value.value)
+        }
+    }
+    override fun deserialize(decoder: Decoder): JSONPresence<T> =
+        if (decoder.decodeNotNullMark()) JSONPresence.Value(valueSerializer.deserialize(decoder))
+        else { decoder.decodeNull(); JSONPresence.Null }
+}
+
+`)
+	b.WriteString(`/** Encodes Go byte slices using JSON base64 strings. */
+object ByteStringSerializer : KSerializer<ByteArray> {
+    override val descriptor = PrimitiveSerialDescriptor("GoBytes", PrimitiveKind.STRING)
+    override fun serialize(encoder: Encoder, value: ByteArray) = encoder.encodeString(java.util.Base64.getEncoder().encodeToString(value))
+    override fun deserialize(decoder: Decoder): ByteArray = java.util.Base64.getDecoder().decode(decoder.decodeString())
+}
+
+`)
 	// InstantSerializer: converts between ISO 8601 strings and java.time.Instant.
 	b.WriteString("/** Serializes [Instant] as an ISO 8601 string. */\n")
 	b.WriteString("object InstantSerializer : KSerializer<Instant> {\n")
@@ -1984,7 +2150,11 @@ func (d *docRegistry[C]) writeKotlinTypes(outDir string, out *preparedOutput) er
 		return err
 	}
 	for _, ns := range containers {
-		ktElem, err := d.goTypeToKotlin(ns.Elem())
+		if jsonByteSlice(ns) {
+			fmt.Fprintf(&b, "\ntypealias %s = ByteArray\n", ns.Name())
+			continue
+		}
+		ktElem, err := d.goTypeToKotlinValue(ns.Elem(), true)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ns.Name(), err)
 		}
@@ -2009,6 +2179,16 @@ func (d *docRegistry[C]) writeKotlinTypes(outDir string, out *preparedOutput) er
 		}
 	}
 
+	queryTypes := map[reflect.Type]struct{}{}
+	for _, r := range d.cfg.Routes {
+		if _, seen := queryTypes[r.Query]; r.Query != nil && !seen {
+			queryTypes[r.Query] = struct{}{}
+			b.WriteString("\n")
+			if err := d.emitKotlinStructVariant(&b, r.Query, true); err != nil {
+				return err
+			}
+		}
+	}
 	return out.write(filepath.Join(outDir, "Types.kt"), b.String())
 }
 
@@ -2034,18 +2214,15 @@ func (d *docRegistry[C]) generateMarkdownDoc(path string, out *preparedOutput) e
 			r := &g.routes[i]
 			req := ""
 			if r.Req != nil {
-				req = "`" + routeReqName(r) + "`"
+				req = "`" + strings.ReplaceAll(routeJSONType(r.Req, false, TypeScript), "|", "\\|") + "`"
 			}
 			if r.Query != nil {
 				if req != "" {
 					req += "<br>"
 				}
-				req += "Query: `" + r.Query.Name() + "`"
+				req += "Query: `" + r.Query.Name() + "Query`"
 			}
-			resp := "`" + routeRespName(r) + "`"
-			if r.IsArray {
-				resp = "`" + routeRespName(r) + "[]`"
-			}
+			resp := "`" + strings.ReplaceAll(routeJSONType(r.Resp, r.IsArray, TypeScript), "|", "\\|") + "`"
 			if r.IsSSE {
 				resp += " SSE"
 				if len(r.SSEEvents) > 0 {
@@ -2062,6 +2239,35 @@ func (d *docRegistry[C]) generateMarkdownDoc(path string, out *preparedOutput) e
 				}
 			}
 			fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s |\n", r.Method, r.Path, r.Doc, req, resp)
+		}
+	}
+
+	seenQueries := map[reflect.Type]struct{}{}
+	for _, r := range d.cfg.Routes {
+		if r.Query == nil {
+			continue
+		}
+		if _, ok := seenQueries[r.Query]; ok {
+			continue
+		}
+		seenQueries[r.Query] = struct{}{}
+		fields, err := routeQueryFields(d, &r)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "\n### %sQuery parameters\n\n| Parameter | Type | Required |\n|-----------|------|----------|\n", r.Query.Name())
+		for _, f := range fields {
+			_, opts := parseJSONTag(f.field.Tag.Get("json"))
+			typ, err := goTypeToDocValue(d.cfg, f.field.Type, false)
+			if err != nil {
+				return err
+			}
+			typ = strings.TrimSuffix(typ, " | null")
+			required := "yes"
+			if f.field.Type.Kind() == reflect.Pointer || slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero") {
+				required = ""
+			}
+			fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", f.name, strings.ReplaceAll(typ, "|", "\\|"), required)
 		}
 	}
 
@@ -2101,9 +2307,16 @@ func (d *docRegistry[C]) generateMarkdownDoc(path string, out *preparedOutput) e
 	}
 	for _, t := range types {
 		if t.Kind() == reflect.Slice || t.Kind() == reflect.Map {
+			if jsonByteSlice(t) {
+				fmt.Fprintf(&b, "\n### %s\n\n`type %s = base64 string`\n", t.Name(), t.Name())
+				continue
+			}
 			elem, err := goTypeToDoc(d.cfg, t.Elem())
 			if err != nil {
 				return err
+			}
+			if strings.Contains(elem, " | ") {
+				elem = "(" + elem + ")"
 			}
 			typ := elem + "[]"
 			if t.Kind() == reflect.Map {
@@ -2163,8 +2376,8 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		optional := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero") || sf.Type.Kind() == reflect.Pointer
-		typeName, err := goTypeToDoc(d.cfg, sf.Type)
+		optional := jsonOmittable(sf.Type, opts)
+		typeName, err := goTypeToDocValue(d.cfg, sf.Type, !optional || jsonThreeState(d.cfg, sf.Type, opts))
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", t.Name(), jsonName, err)
 		}
@@ -2182,18 +2395,39 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 			}
 			fieldDoc += "Query parameter: `" + name + "`."
 		}
-		fmt.Fprintf(b, "| `%s` | `%s` | %s | %s |\n", jsonName, typeName, fieldDoc, req)
+		fmt.Fprintf(b, "| `%s` | `%s` | %s | %s |\n", jsonName, strings.ReplaceAll(typeName, "|", "\\|"), fieldDoc, req)
 	}
 	return nil
 }
 
 // goTypeToSwift maps a Go reflect.Type to its Swift type string.
 func (d *docRegistry[C]) goTypeToSwift(t reflect.Type) (string, error) {
+	return d.goTypeToSwiftValue(t, false)
+}
+
+func (d *docRegistry[C]) goTypeToSwiftValue(t reflect.Type, nullable bool) (string, error) {
 	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
+		inner, err := d.goTypeToSwiftValue(t.Elem(), true)
+		if err != nil {
+			return "", err
+		}
+		if nullable && !strings.HasSuffix(inner, "?") {
+			inner += "?"
+		}
+		return inner, nil
+	}
+	if nullable && (t.Kind() == reflect.Map || t.Kind() == reflect.Slice) {
+		inner, err := d.goTypeToSwiftValue(t, false)
+		if err != nil {
+			return "", err
+		}
+		return inner + "?", nil
 	}
 	if m := lookupSpecial(d.cfg, t); m != nil {
 		return m.SwiftType, nil
+	}
+	if jsonByteSlice(t) {
+		return "Data", nil
 	}
 
 	if _, ok := d.aliasNames[t.Name()]; ok {
@@ -2212,12 +2446,15 @@ func (d *docRegistry[C]) goTypeToSwift(t reflect.Type) (string, error) {
 		if isSDKPkg(d.cfg, t.PkgPath()) {
 			return t.Name(), nil // Named slice.
 		}
-		e, err := d.goTypeToSwift(t.Elem())
+		e, err := d.goTypeToSwiftValue(t.Elem(), true)
 		if err != nil {
 			return "", err
 		}
 		return "[" + e + "]", nil
 	case reflect.Map:
+		if t.Key().Kind() != reflect.String {
+			return "", fmt.Errorf("generated Swift JSON maps require string keys: %s", t)
+		}
 		if isSDKPkg(d.cfg, t.PkgPath()) {
 			return t.Name(), nil
 		}
@@ -2225,7 +2462,10 @@ func (d *docRegistry[C]) goTypeToSwift(t reflect.Type) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		v, err := d.goTypeToSwift(t.Elem())
+		if k != "String" {
+			return "", fmt.Errorf("generated Swift JSON maps require string keys: %s maps to %s", t, k)
+		}
+		v, err := d.goTypeToSwiftValue(t.Elem(), true)
 		if err != nil {
 			return "", err
 		}
@@ -2239,11 +2479,20 @@ func (d *docRegistry[C]) goTypeToSwift(t reflect.Type) (string, error) {
 
 // emitSwiftStruct writes a public Codable struct to b.
 func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) error {
+	return d.emitSwiftStructVariant(b, t, false)
+}
+
+func (d *docRegistry[C]) emitSwiftStructVariant(b *strings.Builder, t reflect.Type, query bool) error {
 	if doc := d.typeDoc[t.Name()]; doc != "" {
 		b.WriteString(formatSwiftDoc(doc, ""))
 	}
 	name := t.Name()
+	if query {
+		name += "Query"
+	}
 	fmt.Fprintf(b, "public struct %s: Codable {\n", name)
+	var swiftFields []swiftField
+	hasRequiredNullable := false
 	var codingKeys []string
 	needCodingKeys := false
 	fields, err := jsonFields(d.cfg, t)
@@ -2257,13 +2506,25 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 		if jsonName == "" {
 			jsonName = sf.Name
 		}
-		omit := slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
+		omit := jsonOmittable(sf.Type, opts)
 		isPtr := sf.Type.Kind() == reflect.Pointer
 		swiftType, err := d.goTypeToSwift(sf.Type)
 		if err != nil {
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
-		optional := isPtr || (omit && !isPtr)
+		optional := omit
+		if query {
+			optional = isPtr || slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero")
+		}
+		nullable := jsonNilable(sf.Type)
+		if base, ok := strings.CutSuffix(swiftType, "?"); ok {
+			swiftType = base
+			nullable = true
+		}
+		presence := !query && jsonThreeState(d.cfg, sf.Type, opts)
+		if !query && (presence || (nullable && !optional)) {
+			hasRequiredNullable = true
+		}
 		rawSwiftName := swiftPropertyName(sf.Name, jsonName)
 		if !isIdentifier(rawSwiftName) {
 			return fmt.Errorf("invalid generated Swift property name %q for %s.%s", rawSwiftName, t, sf.Name)
@@ -2285,16 +2546,72 @@ func (d *docRegistry[C]) emitSwiftStruct(b *strings.Builder, t reflect.Type) err
 				b.WriteString(formatSwiftDoc(fdoc, "    "))
 			}
 		}
-		if optional {
+		swiftFields = append(swiftFields, swiftField{swiftName, swiftType, optional, nullable, presence})
+		switch {
+		case presence:
+			fmt.Fprintf(b, "    public let %s: JSONPresence<%s>\n", swiftName, swiftType)
+		case optional || nullable:
 			fmt.Fprintf(b, "    public let %s: %s?\n", swiftName, swiftType)
-		} else {
+		default:
 			fmt.Fprintf(b, "    public let %s: %s\n", swiftName, swiftType)
 		}
 	}
-	if needCodingKeys {
+	if needCodingKeys || hasRequiredNullable {
 		b.WriteString("\n    private enum CodingKeys: String, CodingKey {\n")
 		for _, key := range codingKeys {
 			b.WriteString(key)
+		}
+		b.WriteString("    }\n")
+	}
+	{
+		b.WriteString("\n    public init(")
+		for i, f := range swiftFields {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if f.presence {
+				fmt.Fprintf(b, "%s: JSONPresence<%s> = .missing", f.name, f.typ)
+			} else {
+				fmt.Fprintf(b, "%s: %s", f.name, f.typ)
+				if f.optional || f.nullable {
+					b.WriteString("?")
+				}
+				if f.optional {
+					b.WriteString(" = nil")
+				}
+			}
+		}
+		b.WriteString(") {\n")
+		for _, f := range swiftFields {
+			fmt.Fprintf(b, "        self.%s = %s\n", f.name, f.name)
+		}
+		b.WriteString("    }\n")
+	}
+	if hasRequiredNullable {
+		b.WriteString("\n    public init(from decoder: Decoder) throws {\n        let c = try decoder.container(keyedBy: Self.CodingKeys.self)\n")
+		for _, f := range swiftFields {
+			switch {
+			case f.presence:
+				fmt.Fprintf(b, "        if !c.contains(.%s) { self.%s = .missing } else if try c.decodeNil(forKey: .%s) { self.%s = .null } else { self.%s = .value(try c.decode(%s.self, forKey: .%s)) }\n", f.name, f.name, f.name, f.name, f.name, f.typ, f.name)
+			case f.optional:
+				fmt.Fprintf(b, "        self.%s = try c.decodeIfPresent(%s.self, forKey: .%s)\n", f.name, f.typ, f.name)
+			case f.nullable:
+				fmt.Fprintf(b, "        self.%s = try c.decode(%s?.self, forKey: .%s)\n", f.name, f.typ, f.name)
+			default:
+				fmt.Fprintf(b, "        self.%s = try c.decode(%s.self, forKey: .%s)\n", f.name, f.typ, f.name)
+			}
+		}
+		b.WriteString("    }\n\n    public func encode(to encoder: Encoder) throws {\n        var c = encoder.container(keyedBy: Self.CodingKeys.self)\n")
+		for _, f := range swiftFields {
+			if f.presence {
+				fmt.Fprintf(b, "        switch self.%s { case .missing: break; case .null: try c.encodeNil(forKey: .%s); case .value(let value): try c.encode(value, forKey: .%s) }\n", f.name, f.name, f.name)
+				continue
+			}
+			method := "encode"
+			if f.optional {
+				method = "encodeIfPresent"
+			}
+			fmt.Fprintf(b, "        try c.%s(self.%s, forKey: .%s)\n", method, f.name, f.name)
 		}
 		b.WriteString("    }\n")
 	}
@@ -2307,6 +2624,28 @@ func (d *docRegistry[C]) writeSwiftTypes(outDir string, out *preparedOutput) err
 	b.WriteString("// Code generated by gen-api-sdk. DO NOT EDIT.\nimport Foundation\n\n")
 	b.WriteString("/// ISO 8601 timestamp string (e.g. \"2026-04-13T12:00:00Z\").\n")
 	b.WriteString("public typealias ISOTimestamp = String\n\n")
+	b.WriteString(`/// A JSON field that may be omitted, null, or a value.
+public enum JSONPresence<Value: Codable>: Codable {
+    case missing
+    case null
+    case value(Value)
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self = container.decodeNil() ? .null : .value(try container.decode(Value.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .missing: throw EncodingError.invalidValue(self, .init(codingPath: encoder.codingPath, debugDescription: "Missing fields must be omitted"))
+        case .null: try container.encodeNil()
+        case .value(let value): try container.encode(value)
+        }
+    }
+}
+
+`)
 
 	// JSONValue: a Codable enum for arbitrary JSON (used for json.RawMessage / map[string]any fields).
 	b.WriteString(`/// A Codable representation of an arbitrary JSON value.
@@ -2389,14 +2728,24 @@ public enum JSONValue: Codable, Equatable {
 		if doc := d.typeDoc[ns.Name()]; doc != "" {
 			b.WriteString(formatSwiftDoc(doc, ""))
 		}
-		swElem, err := d.goTypeToSwift(ns.Elem())
+		if jsonByteSlice(ns) {
+			fmt.Fprintf(&b, "public typealias %s = Data\n", ns.Name())
+			continue
+		}
+		swElem, err := d.goTypeToSwiftValue(ns.Elem(), true)
 		if err != nil {
 			return fmt.Errorf("%s: %w", ns.Name(), err)
 		}
 		if ns.Kind() == reflect.Map {
+			if ns.Key().Kind() != reflect.String {
+				return fmt.Errorf("generated Swift JSON maps require string keys: %s", ns)
+			}
 			key, err := d.goTypeToSwift(ns.Key())
 			if err != nil {
 				return err
+			}
+			if key != "String" {
+				return fmt.Errorf("generated Swift JSON maps require string keys: %s maps to %s", ns, key)
 			}
 			fmt.Fprintf(&b, "public typealias %s = [%s: %s]\n", ns.Name(), key, swElem)
 		} else {
@@ -2414,6 +2763,16 @@ public enum JSONValue: Codable, Equatable {
 		}
 	}
 
+	queryTypes := map[reflect.Type]struct{}{}
+	for _, r := range d.cfg.Routes {
+		if _, seen := queryTypes[r.Query]; r.Query != nil && !seen {
+			queryTypes[r.Query] = struct{}{}
+			b.WriteString("\n")
+			if err := d.emitSwiftStructVariant(&b, r.Query, true); err != nil {
+				return err
+			}
+		}
+	}
 	return out.write(filepath.Join(outDir, "Types.swift"), b.String())
 }
 
@@ -2473,7 +2832,10 @@ func jsonFields[C ~string](cfg *apispec.Config[C], t reflect.Type) ([]jsonField,
 			if sf.Tag.Get("json") == "-" || (!sf.IsExported() && (!sf.Anonymous || base.Kind() != reflect.Struct)) {
 				continue
 			}
-			name, _ := parseJSONTag(sf.Tag.Get("json"))
+			name, opts := parseJSONTag(sf.Tag.Get("json"))
+			if slices.Contains(opts, "string") {
+				return fmt.Errorf("%s.%s: json option string is not supported; use an explicit string wire field", owner, sf.Name)
+			}
 			tagged := name != ""
 			if sf.Anonymous && name == "" && base.Kind() == reflect.Struct {
 				if sf.Type.Kind() == reflect.Pointer {
@@ -2591,17 +2953,26 @@ func parseJSONTag(tag string) (name string, opts []string) {
 
 // writeFieldDecl writes a single "val name: Type" (with optional "? = null").
 func writeFieldDecl(b *strings.Builder, f *kotlinField) {
+	if f.optional {
+		b.WriteString("@kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER) ")
+	}
+	if f.presence {
+		fmt.Fprintf(b, "val %s: JSONPresence<%s> = JSONPresence.Missing", f.ktName, f.ktType)
+		return
+	}
+	fmt.Fprintf(b, "val %s: %s", f.ktName, f.ktType)
 	if f.nullable {
-		fmt.Fprintf(b, "val %s: %s? = null", f.ktName, f.ktType)
-	} else {
-		fmt.Fprintf(b, "val %s: %s", f.ktName, f.ktType)
+		b.WriteString("?")
+	}
+	if f.optional {
+		b.WriteString(" = null")
 	}
 }
 
 // fieldsNeedBlock returns true if any field requires its own line.
 func fieldsNeedBlock(fields []kotlinField) bool {
 	for _, f := range fields {
-		if f.serialName != "" || f.doc != "" {
+		if f.serialName != "" || f.doc != "" || f.presence {
 			return true
 		}
 	}
@@ -2627,17 +2998,13 @@ func docGroupRoutes(routes []apispec.Route) []docRouteGroup {
 
 // tsObjectKey returns a TypeScript object property key for jsonName.
 func tsObjectKey(jsonName string) string {
+	if jsonName == "__proto__" {
+		return `["__proto__"]`
+	}
 	if isIdentifier(jsonName) {
 		return jsonName
 	}
 	return fmt.Sprintf("%q", jsonName)
-}
-
-func tsPropertyAccess(jsonName string) string {
-	if isIdentifier(jsonName) {
-		return "." + jsonName
-	}
-	return fmt.Sprintf("[%q]", jsonName)
 }
 
 // swiftEscapeIdent wraps name in backticks if it is a Swift reserved word.
@@ -2653,6 +3020,13 @@ func swiftEscapeIdent(name string) string {
 type tsFieldBinding struct {
 	jsonName string
 	expr     string
+	optional bool
+}
+
+// swiftField holds generated Swift declaration and Codable metadata.
+type swiftField struct {
+	name, typ                    string
+	optional, nullable, presence bool
 }
 
 // kotlinField holds parsed information about a single struct field for Kotlin
@@ -2661,7 +3035,9 @@ type kotlinField struct {
 	jsonName   string // JSON key from the struct tag.
 	ktName     string // Kotlin property name (same as jsonName).
 	ktType     string // Kotlin type (e.g. "String", "List<Foo>").
-	nullable   bool   // Whether the field is T? = null.
+	nullable   bool   // Whether the field type admits null.
+	optional   bool   // Whether an omitted field uses a default.
+	presence   bool   // The field can be absent, null, or a value.
 	serialName string // Non-empty when @SerialName annotation is needed.
 	doc        string // Go field documentation comment.
 }

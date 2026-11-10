@@ -53,13 +53,14 @@ function validateRecord<T>(v: ValidatorInput, path: string, valValidator: ValueV
   }
   const result: Record<string, T> = {};
   for (const k of Object.keys(v as ObjectValue)) {
-    result[k] = valValidator((v as ObjectValue)[k]);
+    Object.defineProperty(result, k, { value: valValidator((v as ObjectValue)[k]), enumerable: true, writable: true, configurable: true });
   }
   return result;
 }
 
 export function validatetestEnvelopeSource(raw: ValidatorInput): testEnvelopeSource {
   const obj = asObject(raw, "testEnvelopeSource");
+  if (!Object.prototype.hasOwnProperty.call(obj, "agent")) throw new TypeError("missing required field: testEnvelopeSource.agent");
   return {
     agent: asString(obj["agent"], "testEnvelopeSource.agent"),
   };
@@ -67,6 +68,7 @@ export function validatetestEnvelopeSource(raw: ValidatorInput): testEnvelopeSou
 
 export function validatetestEnvelopePayload(raw: ValidatorInput): testEnvelopePayload {
   const obj = asObject(raw, "testEnvelopePayload");
+  if (!Object.prototype.hasOwnProperty.call(obj, "text")) throw new TypeError("missing required field: testEnvelopePayload.text");
   return {
     text: asString(obj["text"], "testEnvelopePayload.text"),
   };
@@ -74,18 +76,22 @@ export function validatetestEnvelopePayload(raw: ValidatorInput): testEnvelopePa
 
 export function validatetestEnvelope(raw: ValidatorInput): testEnvelope {
   const obj = asObject(raw, "testEnvelope");
+  if (!Object.prototype.hasOwnProperty.call(obj, "kind")) throw new TypeError("missing required field: kind");
   const result: testEnvelope = {
     kind: asString(obj["kind"], "testEnvelope.kind"),
   };
   switch (result.kind) {
     case "source":
-      result.source = validatetestEnvelopeSource(obj["source"]);
+      if (!Object.prototype.hasOwnProperty.call(obj, "source")) throw new TypeError("missing required field: testEnvelope.source");
+      Object.defineProperty(result, "source", { value: validatetestEnvelopeSource(obj["source"]), enumerable: true, writable: true, configurable: true });
       break;
     case "label":
-      result.label = asString(obj["label"], "testEnvelope.label");
+      if (!Object.prototype.hasOwnProperty.call(obj, "label")) throw new TypeError("missing required field: testEnvelope.label");
+      Object.defineProperty(result, "label", { value: asString(obj["label"], "testEnvelope.label"), enumerable: true, writable: true, configurable: true });
       break;
     case "text":
-      result.text = validatetestEnvelopePayload(obj["text"]);
+      if (!Object.prototype.hasOwnProperty.call(obj, "text")) throw new TypeError("missing required field: testEnvelope.text");
+      Object.defineProperty(result, "text", { value: validatetestEnvelopePayload(obj["text"]), enumerable: true, writable: true, configurable: true });
       break;
     // Unknown kinds pass through.
   }

@@ -1,5 +1,8 @@
 export function validatetestTSEmbeddedResponse(raw: ValidatorInput): testTSEmbeddedResponse {
   const obj = asObject(raw, "testTSEmbeddedResponse");
+  if (!Object.prototype.hasOwnProperty.call(obj, "limit")) throw new TypeError("missing required field: testTSEmbeddedResponse.limit");
+  if (!Object.prototype.hasOwnProperty.call(obj, "id")) throw new TypeError("missing required field: testTSEmbeddedResponse.id");
+  if (!Object.prototype.hasOwnProperty.call(obj, "name")) throw new TypeError("missing required field: testTSEmbeddedResponse.name");
   return {
     limit: asNumber(obj["limit"], "testTSEmbeddedResponse.limit"),
     id: asString(obj["id"], "testTSEmbeddedResponse.id"),

@@ -16,6 +16,8 @@ import (
 	"github.com/maruel/apisdkgen/apispec"
 )
 
+type testNullableElements []*int
+
 type testRecursiveSlice []testRecursiveSlice
 type testRecursiveMap map[string]testRecursiveMap
 type testRecursiveNode struct {
@@ -103,6 +105,175 @@ type testJSONTagged struct {
 type testJSONTagWins struct {
 	testJSONUntagged
 	testJSONTagged
+}
+
+type testCustomMarshaler struct {
+	Value string `json:"value"`
+}
+
+func (testCustomMarshaler) MarshalJSON() ([]byte, error) { return []byte(`"different shape"`), nil }
+
+type testQueryInputQuery struct{}
+
+func TestNativeQueryTypeNameCollision(t *testing.T) {
+	t.Parallel()
+	query := reflect.TypeFor[testQueryInput]()
+	conflict := reflect.TypeFor[testQueryInputQuery]()
+	cfg := &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{query.PkgPath(): {}}, ExtraSeeds: []reflect.Type{conflict}, Routes: []apispec.Route{{Name: "list", Method: "GET", Path: "/", Query: query, Resp: reflect.TypeFor[testSDKEvent]()}}}
+	for _, out := range []outputPaths{{KotlinDir: "kotlin"}, {SwiftDir: "swift"}} {
+		if err := validateSDKTypes(cfg, nil, out); err == nil || !strings.Contains(err.Error(), "generated query type name") {
+			t.Fatalf("collision error = %v", err)
+		}
+	}
+}
+
+func TestUnsupportedJSONShapes(t *testing.T) {
+	t.Parallel()
+	type stringTag struct {
+		Value int `json:"value,string"`
+	}
+	cfg := &apispec.Config[string]{}
+	if _, err := jsonFields(cfg, reflect.TypeFor[stringTag]()); err == nil || !strings.Contains(err.Error(), "json option string") {
+		t.Fatalf("string option: %v", err)
+	}
+	d := &docRegistry[string]{cfg: cfg}
+	if _, err := d.goTypeToSwift(reflect.TypeFor[map[int]string]()); err == nil || !strings.Contains(err.Error(), "require string keys") {
+		t.Fatalf("Swift map key: %v", err)
+	}
+}
+
+func TestRecursiveSSEContainerFailsClearly(t *testing.T) {
+	t.Parallel()
+	type event struct {
+		Items testRecursiveSlice `json:"items"`
+	}
+	typ := reflect.TypeFor[event]()
+	cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+	api := NewAPI(t.TempDir(), "WireSDK", NewVersion("v1", ".", cfg))
+	api.Languages = []Language{TypeScript}
+	if err := api.Generate(); err == nil || !strings.Contains(err.Error(), "recursive SSE container") {
+		t.Fatalf("recursive SSE: %v", err)
+	}
+}
+
+func TestSwiftNamedStringMapKeyFailsClearly(t *testing.T) {
+	t.Parallel()
+	type key string
+	typ := reflect.TypeFor[key]()
+	d := &docRegistry[string]{cfg: &apispec.Config[string]{}, aliasNames: map[string]struct{}{typ.Name(): {}}}
+	if _, err := d.goTypeToSwift(reflect.TypeFor[map[key]int]()); err == nil || !strings.Contains(err.Error(), "require string keys") {
+		t.Fatalf("Swift named key: %v", err)
+	}
+}
+
+func TestNullableNamedSliceDocumentation(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testNullableElements]()
+	cfg := &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, ExtraSeeds: []reflect.Type{typ}, DocumentExtraSeeds: true}
+	d := &docRegistry[string]{cfg: cfg}
+	out := &preparedOutput{files: map[string]string{}}
+	if err := d.generateMarkdownDoc("api.md", out); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.files["api.md"]; !strings.Contains(got, "`type testNullableElements = (int | null)[]`\n") {
+		t.Fatalf("nullable named slice documentation: %s", got)
+	}
+}
+
+func TestNativeSSENullableRootsRejected(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testRootBytes]()
+	for _, tc := range []struct {
+		name           string
+		primary, event reflect.Type
+	}{
+		{"primary bytes", typ, nil}, {"named bytes", reflect.TypeFor[testSDKEvent](), typ},
+		{"primary map", reflect.TypeFor[testRootMap](), nil}, {"named map", reflect.TypeFor[testSDKEvent](), reflect.TypeFor[testRootMap]()},
+		{"primary slice", reflect.TypeFor[testRootList](), nil}, {"named slice", reflect.TypeFor[testSDKEvent](), reflect.TypeFor[testRootList]()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			route := apispec.Route{Name: "events", Path: "/events", Resp: tc.primary, IsSSE: true}
+			if tc.event != nil {
+				route.SSEEvents = []apispec.SSEEvent{{Name: "data", Handler: "onData", Resp: tc.event}}
+			}
+			cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, KotlinPackage: "test", Routes: []apispec.Route{route}}
+			for _, lang := range []Language{Kotlin, Swift} {
+				api := NewAPI(t.TempDir(), "WireSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{lang}
+				if err := api.Generate(); err == nil || !strings.Contains(err.Error(), "nullable or byte-container SSE root") {
+					t.Fatalf("%s: %v", lang, err)
+				}
+			}
+		})
+	}
+}
+
+func TestJSONStructOmitValidation(t *testing.T) {
+	t.Parallel()
+	type inner struct {
+		Value string `json:"value"`
+	}
+	type bad struct {
+		V inner `json:"v,omitempty"` //nolint:modernize // Exercise the rejected JSON tag.
+	}
+	type good struct {
+		V inner `json:"v,omitempty,omitzero"` //nolint:modernize // Exercise the supported combined tags.
+	}
+	type queryOnly struct {
+		V inner `json:"v,omitempty" query:"v"` //nolint:modernize // Query-only fields retain omitempty.
+	}
+	makeConfig := func(req, query reflect.Type) *apispec.Config[string] {
+		typ := reflect.TypeFor[inner]()
+		return &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}}, Routes: []apispec.Route{{Name: "test", Method: "POST", Path: "/", Req: req, Query: query, Resp: reflect.TypeFor[testSDKEvent]()}}}
+	}
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name       string
+			req, query reflect.Type
+		}{
+			{"omitzero", reflect.TypeFor[good](), nil},
+			{"query-only", nil, reflect.TypeFor[queryOnly]()},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if err := validateJSONWireFields(makeConfig(tc.req, tc.query)); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name       string
+			req, query reflect.Type
+		}{
+			{"body", reflect.TypeFor[bad](), nil},
+			{"body and query", reflect.TypeFor[queryOnly](), reflect.TypeFor[queryOnly]()},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if err := validateJSONWireFields(makeConfig(tc.req, tc.query)); err == nil || !strings.Contains(err.Error(), "omitempty does not omit value structs") {
+					t.Fatalf("expected omission error, got %v", err)
+				}
+			})
+		}
+	})
+}
+
+func TestCustomMarshalerRequiresMapping(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testCustomMarshaler]()
+	cfg := &apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}}
+	if _, err := walkSDKTypes(cfg, []reflect.Type{typ}); err == nil || !strings.Contains(err.Error(), "custom JSON or text marshaler") {
+		t.Fatalf("missing custom mapping error: %v", err)
+	}
+	cfg.SpecialTypes = []apispec.SpecialType{{Type: typ, TSType: "string"}}
+	if _, err := walkSDKTypes(cfg, []reflect.Type{typ}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSDKTypeDiscovery(t *testing.T) {
@@ -374,4 +545,127 @@ func compileDiscovery(t *testing.T, target, dir string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s failed: %v\n%s", cmd.Path, err, out)
 	}
+}
+
+func TestCustomSourceValidation(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testCustomMeta]()
+	mapping := apispec.SpecialType{Type: typ, TSType: typ.Name(), KTType: typ.Name(), SwiftType: typ.Name(), TSSource: "export interface testCustomMeta {}", KotlinSource: "class testCustomMeta", SwiftSource: "struct testCustomMeta {}"}
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+		cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{mapping}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSDKTypes(&cfg, nil, outputPaths{TypeScriptDir: "ts", KotlinDir: "kt", SwiftDir: "swift"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name   string
+			mutate func(*apispec.Config[string])
+			out    outputPaths
+			want   string
+		}{
+			{"missing target", func(c *apispec.Config[string]) { c.SpecialTypes[0].SwiftSource = "" }, outputPaths{SwiftDir: "swift"}, "missing for a selected target"},
+			{"invalid mapping", func(c *apispec.Config[string]) { c.SpecialTypes[0].TSType = "unknown" }, outputPaths{}, "source mapping must name its Go type"},
+			{"nil dependency", func(c *apispec.Config[string]) { c.SpecialTypes[0].Dependencies = []reflect.Type{nil} }, outputPaths{}, "must not be nil"},
+			{"duplicate mapping", func(c *apispec.Config[string]) { c.SpecialTypes = append(c.SpecialTypes, c.SpecialTypes[0]) }, outputPaths{}, "duplicate type"},
+			{"kotlin helper collision", func(c *apispec.Config[string]) { c.SpecialTypes[0].KotlinSymbols = []string{"JSONPresence"} }, outputPaths{KotlinDir: "kt"}, "conflicts with a generated declaration"},
+			{"swift helper collision", func(c *apispec.Config[string]) { c.SpecialTypes[0].SwiftSymbols = []string{"JSONValue"} }, outputPaths{SwiftDir: "swift"}, "conflicts with a generated declaration"},
+			{"validator collision", func(c *apispec.Config[string]) {
+				c.SpecialTypes[0].TSValidator = "asString"
+				c.SpecialTypes[0].TSValidate = "asString(%[1]s,%[2]q)"
+			}, outputPaths{TypeScriptDir: "ts"}, "conflicts with a generated declaration"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{mapping}}
+				tc.mutate(&cfg)
+				err := cfg.Validate()
+				if err == nil {
+					err = validateSDKTypes(&cfg, nil, tc.out)
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("got %v, want %q", err, tc.want)
+				}
+			})
+		}
+	})
+}
+
+type ISOTimestamp string
+type ObjectValue string
+
+func TestCustomSSEValidation(t *testing.T) {
+	t.Parallel()
+	t.Run("error", func(t *testing.T) {
+		t.Parallel()
+		for _, name := range []string{"Array", "Number", "TypeError", "Object", "JSON"} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				typ := reflect.TypeFor[testCustomMeta]()
+				cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: typ.Name(), TSSource: "export interface testCustomMeta {}", TSValidator: name, TSValidate: name + "(%[1]s)"}}}
+				err := validateSDKTypes(&cfg, nil, outputPaths{TypeScriptDir: "ts"})
+				if err == nil || !strings.Contains(err.Error(), "conflicts with a generated declaration") {
+					t.Fatalf("got %v", err)
+				}
+			})
+		}
+		t.Run("scalar name collision", func(t *testing.T) {
+			t.Parallel()
+			typ := reflect.TypeFor[ISOTimestamp]()
+			cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: typ.Name(), TSSource: "export type ISOTimestamp = string"}}}
+			err := validateSDKTypes(&cfg, nil, outputPaths{TypeScriptDir: "ts"})
+			if err == nil || !strings.Contains(err.Error(), "conflicts with a generated declaration") {
+				t.Fatalf("got %v", err)
+			}
+		})
+		t.Run("mapped root validator namespace", func(t *testing.T) {
+			t.Parallel()
+			typ := reflect.TypeFor[ValidatorInput]()
+			cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: typ.Name(), TSSource: "export interface ValidatorInput {}", TSValidate: "(%[1]s as ValidatorInput)"}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+			api := NewAPI(t.TempDir(), "WireSDK", NewVersion("v1", ".", cfg))
+			api.Languages = []Language{TypeScript}
+			if err := api.Generate(); err == nil || !strings.Contains(err.Error(), "conflicts with a generated declaration") {
+				t.Fatalf("got %v", err)
+			}
+		})
+		t.Run("mapped scalar root validator namespace", func(t *testing.T) {
+			t.Parallel()
+			typ := reflect.TypeFor[ObjectValue]()
+			cfg := apispec.Config[string]{SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: typ.Name(), TSSource: "export type ObjectValue = string", TSValidate: "(%[1]s as ObjectValue)"}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+			api := NewAPI(t.TempDir(), "WireSDK", NewVersion("v1", ".", cfg))
+			api.Languages = []Language{TypeScript}
+			if err := api.Generate(); err == nil || !strings.Contains(err.Error(), "conflicts with a generated declaration") {
+				t.Fatalf("got %v", err)
+			}
+		})
+		for _, tc := range []struct {
+			name           string
+			primary, event reflect.Type
+		}{
+			{"root", reflect.TypeFor[testCustomMeta](), nil},
+			{"field", reflect.TypeFor[testMetaEnvelope](), nil},
+			{"named event", reflect.TypeFor[testSDKEvent](), reflect.TypeFor[testCustomMeta]()},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				typ := reflect.TypeFor[testCustomMeta]()
+				route := apispec.Route{Name: "events", Path: "/events", Resp: tc.primary, IsSSE: true}
+				if tc.event != nil {
+					route.SSEEvents = []apispec.SSEEvent{{Name: "custom", Handler: "onCustom", Resp: tc.event}}
+				}
+				cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, SpecialTypes: []apispec.SpecialType{{Type: typ, TSType: typ.Name(), TSSource: "export interface testCustomMeta {}"}}, Routes: []apispec.Route{route}}
+				api := NewAPI(t.TempDir(), "WireSDK", NewVersion("v1", ".", cfg))
+				api.Languages = []Language{TypeScript}
+				err := api.Generate()
+				if err == nil || !strings.Contains(err.Error(), "requires TSValidate") {
+					t.Fatalf("got %v", err)
+				}
+			})
+		}
+	})
 }

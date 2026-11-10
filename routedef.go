@@ -22,6 +22,40 @@ func routeRespName(r *apispec.Route) string {
 	return r.Resp.Name()
 }
 
+// routeJSONType models nullability at the JSON document root, independently
+// from non-null named container aliases used within DTOs.
+func routeJSONType(t reflect.Type, array bool, lang Language) string {
+	name := t.Name()
+	switch lang {
+	case TypeScript:
+		if jsonNilable(t) {
+			name += " | null"
+		}
+	case Kotlin, Swift:
+		if jsonNilable(t) {
+			name += "?"
+		}
+	default:
+		panic("unsupported SDK language")
+	}
+	if array {
+		switch lang {
+		case TypeScript:
+			if strings.Contains(name, " | ") {
+				name = "(" + name + ")"
+			}
+			return name + "[] | null"
+		case Kotlin:
+			return "List<" + name + ">?"
+		case Swift:
+			return "[" + name + "]?"
+		default:
+			panic("unsupported SDK language")
+		}
+	}
+	return name
+}
+
 func routeCategoryName(r *apispec.Route) string {
 	if r.Category != "" {
 		return r.Category
@@ -40,10 +74,7 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
-	respType := routeRespName(r)
-	if r.IsArray {
-		respType += "[]"
-	}
+	respType := routeJSONType(r.Resp, r.IsArray, TypeScript)
 
 	args := make([]string, 0, len(params)+len(r.QueryParams)+1)
 	for _, p := range params {
@@ -53,11 +84,11 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 		args = append(args, q+": string")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+tsQueryType(r, fields))
 	}
 	hasReq := r.Req != nil
 	if hasReq {
-		args = append(args, "req: "+routeReqName(r))
+		args = append(args, "req: "+routeJSONType(r.Req, false, TypeScript))
 	}
 	if r.HeadersArg {
 		args = append(args, "headers: Record<string, string> = {}")
@@ -94,6 +125,22 @@ func writeRouteTSJSONMethod(r *apispec.Route, b *strings.Builder, params []strin
 	default:
 		fmt.Fprintf(b, "    %s: (%s): Promise<%s> => request<%s>(%q, %s),\n", r.Name, strings.Join(args, ", "), respType, respType, r.Method, tsPath)
 	}
+}
+
+// tsQueryType preserves query omission rules independently of JSON presence.
+func tsQueryType(r *apispec.Route, fields []queryField) string {
+	var optional []string
+	for _, field := range fields {
+		_, opts := parseJSONTag(field.field.Tag.Get("json"))
+		if field.field.Type.Kind() == reflect.Pointer || slices.Contains(opts, "omitempty") || slices.Contains(opts, "omitzero") {
+			optional = append(optional, fmt.Sprintf("%q", field.jsonName))
+		}
+	}
+	if len(optional) == 0 {
+		return r.Query.Name()
+	}
+	keys := strings.Join(optional, " | ")
+	return fmt.Sprintf("Omit<%s, %s> & Partial<Pick<%s, %s>>", r.Query.Name(), keys, r.Query.Name(), keys)
 }
 
 // writeTSQuery emits the common scalar query encoder for JSON and SSE methods.
@@ -137,7 +184,7 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 		args = append(args, p+": string")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+tsQueryType(r, fields))
 	}
 	tsPath := buildTSPath(r.Path, params, r.QueryParams)
 	respName := routeRespName(r)
@@ -183,14 +230,41 @@ func writeRouteTSSSEMethod(r *apispec.Route, b *strings.Builder, params []string
 	b.WriteString("    },\n")
 }
 
-func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
+// kotlinRootBytesSerializer explicitly selects Go base64 serialization for
+// root byte containers, including nested containers.
+func kotlinRootBytesSerializer[C ~string](d *docRegistry[C], t reflect.Type) (string, bool) {
+	if lookupSpecial(d.cfg, t) != nil {
+		return "", false
+	}
+	if t.Kind() == reflect.Pointer {
+		return kotlinRootBytesSerializer(d, t.Elem())
+	}
+	if jsonByteSlice(t) {
+		return "ByteStringSerializer.nullable", true
+	}
+	switch t.Kind() {
+	case reflect.Slice:
+		if inner, ok := kotlinRootBytesSerializer(d, t.Elem()); ok {
+			return "ListSerializer(" + inner + ").nullable", true
+		}
+	case reflect.Map:
+		if inner, ok := kotlinRootBytesSerializer(d, t.Elem()); ok {
+			key, err := d.goTypeToKotlin(t.Key())
+			if err != nil {
+				return "", false
+			}
+			return "MapSerializer(serializer<" + key + ">(), " + inner + ").nullable", true
+		}
+	default:
+	}
+	return "", false
+}
+
+func writeRouteKotlinJSONFunc[C ~string](d *docRegistry[C], r *apispec.Route, b *strings.Builder, params []string, fields []queryField) {
 	if r.Doc != "" {
 		b.WriteString(formatBlockDoc(r.Doc, "    "))
 	}
-	respType := routeRespName(r)
-	if r.IsArray {
-		respType = "List<" + respType + ">"
-	}
+	respType := routeJSONType(r.Resp, r.IsArray, Kotlin)
 
 	// Build function parameters.
 	args := make([]string, 0, len(params)+len(r.QueryParams)+1)
@@ -201,11 +275,11 @@ func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []str
 		args = append(args, q+": String")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 	}
 	hasReq := r.Req != nil
 	if hasReq {
-		args = append(args, "req: "+routeReqName(r))
+		args = append(args, "req: "+routeJSONType(r.Req, false, Kotlin))
 	}
 	if r.HeadersArg {
 		args = append(args, "headers: Map<String, String> = emptyMap()")
@@ -221,13 +295,25 @@ func writeRouteKotlinJSONFunc(r *apispec.Route, b *strings.Builder, params []str
 	if r.HeadersArg {
 		headersArg = ", headers = headers"
 	}
+	if serializer, ok := kotlinRootBytesSerializer(d, r.Resp); ok {
+		if r.IsArray {
+			serializer = "ListSerializer(" + serializer + ").nullable"
+		}
+		headersArg += ", decode = { json.decodeFromString(" + serializer + ", it) }"
+	}
+	reqExpr := "json.encodeToString(req)"
+	if hasReq {
+		if serializer, ok := kotlinRootBytesSerializer(d, r.Req); ok {
+			reqExpr = "json.encodeToString(" + serializer + ", req)"
+		}
+	}
 	switch {
 	case hasReq:
-		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s, json.encodeToString(req)%s)\n", r.Name, sig, respType, r.Method, ktPath, headersArg)
+		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s, %s%s)\n", r.Name, sig, respType, r.Method, ktPath, reqExpr, headersArg)
 	case r.HeadersArg:
-		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s, headers = headers)\n", r.Name, sig, respType, r.Method, ktPath)
+		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s%s)\n", r.Name, sig, respType, r.Method, ktPath, headersArg)
 	default:
-		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s)\n", r.Name, sig, respType, r.Method, ktPath)
+		fmt.Fprintf(b, "    suspend fun %s(%s): %s = request(%q, %s%s)\n", r.Name, sig, respType, r.Method, ktPath, headersArg)
 	}
 }
 
@@ -240,7 +326,7 @@ func writeRouteKotlinSSEFunc(r *apispec.Route, b *strings.Builder, params []stri
 		args = append(args, p+": String")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 	}
 	args = append(args, routeKotlinSSECallbackArgs(r)...)
 	ktPath := buildKotlinPath(r.Path, r.QueryParams)
@@ -297,7 +383,7 @@ func writeRouteKotlinReconnectingFunc(r *apispec.Route, b *strings.Builder, para
 		callArgs = append(callArgs, p)
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 		callArgs = append(callArgs, "query")
 	}
 	args = append(args, routeKotlinSSECallbackArgs(r)...)
@@ -318,10 +404,7 @@ func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []stri
 	if r.Doc != "" {
 		b.WriteString(formatSwiftDoc(r.Doc, "    "))
 	}
-	respType := routeRespName(r)
-	if r.IsArray {
-		respType = "[" + respType + "]"
-	}
+	respType := routeJSONType(r.Resp, r.IsArray, Swift)
 
 	args := make([]string, 0, len(params)+len(r.QueryParams)+1)
 	for _, p := range params {
@@ -331,11 +414,11 @@ func writeRouteSwiftJSONFunc(r *apispec.Route, b *strings.Builder, params []stri
 		args = append(args, q+": String")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 	}
 	hasReq := r.Req != nil
 	if hasReq {
-		args = append(args, "req: "+routeReqName(r))
+		args = append(args, "req: "+routeJSONType(r.Req, false, Swift))
 	}
 	if r.HeadersArg {
 		args = append(args, "headers: [String: String] = [:]")
@@ -367,7 +450,7 @@ func writeRouteSwiftSSEFunc(r *apispec.Route, b *strings.Builder, params []strin
 		args = append(args, p+": String")
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 	}
 	args = append(args, routeSwiftSSECallbackArgs(r)...)
 	swiftPath := buildSwiftPath(r.Path, r.QueryParams)
@@ -423,7 +506,7 @@ func writeRouteSwiftReconnectingFunc(r *apispec.Route, b *strings.Builder, param
 		callArgs = append(callArgs, p+": "+p)
 	}
 	if r.Query != nil {
-		args = append(args, "query: "+r.Query.Name())
+		args = append(args, "query: "+r.Query.Name()+"Query")
 		callArgs = append(callArgs, "query: query")
 	}
 	args = append(args, routeSwiftSSECallbackArgs(r)...)

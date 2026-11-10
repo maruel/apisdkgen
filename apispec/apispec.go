@@ -1,4 +1,16 @@
 // Package apispec exposes shared API SDK generation specification types.
+//
+// JSON fields follow encoding/json presence and null rules: fields without
+// omitempty or omitzero are required, including nil pointers, slices, and maps
+// encoded as null. Kotlin and Swift use JSONPresence for fields that distinguish
+// omission from null. Ordinary byte slices use Go's base64 string encoding.
+// Custom JSON or text marshalers require a [SpecialType] mapping.
+//
+// Value-struct fields tagged omitempty must also use omitzero or become optional
+// pointers. The json:",string" option, nullable and byte-container native SSE
+// roots, and Swift dictionary keys that do not map to String are unsupported.
+// TypeScript SSE validators support recursive structs but not recursive
+// container aliases. Use a wire-specific DTO or special mapping when needed.
 package apispec
 
 import (
@@ -28,22 +40,24 @@ type ClientErrorModel struct {
 	SwiftDetailsExpr string
 }
 
-// Config holds configuration for SDK code generation.
+// Config holds configuration for SDK code generation. Generated identifiers and
+// query parameter names must be ASCII identifiers. String enums are generated
+// when reached through routes, ExtraSeeds, or configured error codes.
 type Config[C ~string] struct {
-	Routes             []Route
-	ClientScopes       []ClientScope
-	SDKPackagePaths    map[string]struct{}
+	Routes          []Route
+	ClientScopes    []ClientScope
+	SDKPackagePaths map[string]struct{}
+	// ExtraSeeds adds types that are not reachable through routes or error codes.
 	ExtraSeeds         []reflect.Type
 	DocumentExtraSeeds bool
 
-	ErrorModel         ClientErrorModel
-	KotlinPackage      string
-	APIDocTitle        string
-	APIDocIntro        string
-	ErrorDoc           string
-	MCPProtocolVersion string
-	SectionComments    map[string]string
-	SpecialTypes       []SpecialType
+	ErrorModel      ClientErrorModel
+	KotlinPackage   string // Dotted Kotlin namespace, distinct for each version.
+	APIDocTitle     string
+	APIDocIntro     string
+	ErrorDoc        string
+	SectionComments map[string]string
+	SpecialTypes    []SpecialType
 	// Discriminated names types using kind-based dispatch in TS validators.
 	// If kind has known string enum values, matching optional JSON fields are
 	// required variant payloads; other fields are common metadata. Without enum
@@ -64,9 +78,26 @@ func (c *Config[C]) Validate() error {
 			return fmt.Errorf("ExtraSeeds[%d]: type must not be nil", i)
 		}
 	}
+	specialTypes := map[reflect.Type]struct{}{}
 	for i, special := range c.SpecialTypes {
 		if special.Type == nil {
 			return fmt.Errorf("SpecialTypes[%d]: type must not be nil", i)
+		}
+		if _, ok := specialTypes[special.Type]; ok {
+			return fmt.Errorf("SpecialTypes[%d]: duplicate type %s", i, special.Type)
+		}
+		specialTypes[special.Type] = struct{}{}
+		if (special.TSSource != "" && special.TSType != special.Type.Name()) || (special.KotlinSource != "" && special.KTType != special.Type.Name()) || (special.SwiftSource != "" && special.SwiftType != special.Type.Name()) ||
+			((special.TSSource != "" || special.KotlinSource != "" || special.SwiftSource != "") && !isIdentifier(special.Type.Name())) {
+			return fmt.Errorf("SpecialTypes[%d]: source mapping must name its Go type", i)
+		}
+		if special.TSValidator != "" && (special.TSSource == "" || !isIdentifier(special.TSValidator) || special.TSValidate == "") {
+			return fmt.Errorf("SpecialTypes[%d]: TSValidator requires TypeScript source, a valid name, and TSValidate", i)
+		}
+		for j, dep := range special.Dependencies {
+			if dep == nil {
+				return fmt.Errorf("SpecialTypes[%d]: Dependencies[%d] must not be nil", i, j)
+			}
 		}
 	}
 	names := map[string]struct{}{}
@@ -108,22 +139,30 @@ type ClientScope struct {
 	Parameter  string
 }
 
-// Route describes a single API endpoint for generated clients and docs.
+// Route describes a single API endpoint for generated clients and docs. Req
+// supplies the JSON body; path placeholders and query parameters are independent
+// inputs. Typed queries work for JSON endpoints and SSE, including reconnecting
+// streams. When a type is used for both body and query, native clients get a
+// separate <Type>Query DTO, and TypeScript query fields may be absent without
+// weakening the body type.
 type Route struct {
-	Name        string
-	Doc         string
-	Method      string
-	Path        string
-	Category    string
-	Req         reflect.Type
-	Resp        reflect.Type
-	IsArray     bool
-	IsSSE       bool
-	SSEEvents   []SSEEvent
+	Name      string
+	Doc       string
+	Method    string
+	Path      string
+	Category  string
+	Req       reflect.Type
+	Resp      reflect.Type
+	IsArray   bool
+	IsSSE     bool
+	SSEEvents []SSEEvent
+	// QueryParams lists required string arguments for routes without a typed query.
 	QueryParams []string
 	// Query is a named struct whose query-tagged fields supply URL parameters.
 	// It is independent of the JSON request body and cannot be combined with QueryParams.
-	// Values use their scalar wire representation; absent optional fields are omitted.
+	// Strings, numbers, booleans, and types mapped to those scalar representations
+	// are supported. Absent optional values are omitted; supplied empty strings,
+	// zero, and false are sent.
 	// Query tags on fields hidden from JSON are invalid.
 	Query      reflect.Type
 	HeadersArg bool
@@ -226,6 +265,11 @@ type SSEEvent struct {
 }
 
 // SpecialType defines custom mappings for Go types that need non-standard serialization.
+// For a named custom wire type, provide source for each selected language and
+// use the Go type's name in the corresponding type mapping. The consumer owns
+// the supplied code and must test that its codecs preserve the wire format.
+// TSValidate supplies SSE validation; TSValidator identifies an exported
+// function when that expression calls one from TSSource.
 type SpecialType struct {
 	Type       reflect.Type
 	TSType     string // TypeScript type
@@ -233,6 +277,19 @@ type SpecialType struct {
 	SwiftType  string // Swift type
 	DocType    string // API doc type
 	TSValidate string // TS validator format string: %[1]s=pathExpr, %[2]q=pathLit
+	// Source strings define the named type and its codecs in each target language.
+	// Each source may include imports and must declare the mapped Go type's name.
+	TSSource     string
+	KotlinSource string
+	SwiftSource  string
+	// Dependencies are Go DTO types referenced by the supplied source.
+	Dependencies []reflect.Type
+	// TSValidator names an exported function in TSSource used by TSValidate.
+	TSValidator string
+	// KotlinSymbols and SwiftSymbols list every additional top-level declaration
+	// in the corresponding source so generated-name collisions can be rejected.
+	KotlinSymbols []string
+	SwiftSymbols  []string
 }
 
 func validateNamedType(label string, t reflect.Type) error {

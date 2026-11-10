@@ -3,12 +3,21 @@
 package apisdkgen
 
 import (
+	"encoding"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/maruel/apisdkgen/apispec"
+)
+
+var (
+	kotlinReservedNames              = []string{"ApiClient", "ApiException", "Boolean", "ByteArray", "ByteStringSerializer", "Double", "Instant", "InstantSerializer", "Int", "JSONPresence", "JSONPresenceSerializer", "JsonElement", "List", "Long", "Map", "String"}
+	swiftReservedNames               = []string{"ApiClient", "ApiError", "Bool", "Data", "Double", "ISOTimestamp", "Int", "JSONPresence", "JSONValue", "String"}
+	typeScriptValidatorReservedNames = []string{"Array", "JSON", "Number", "Object", "ObjectValue", "Record", "TypeError", "ValidatorInput", "ValueValidator", "asBoolean", "asNumber", "asObject", "asString", "validateArray", "validateRecord"}
 )
 
 // lookupSpecial returns the matching SpecialType entry for t, or nil.
@@ -94,6 +103,11 @@ func walkSDKTypes[C ~string](c *apispec.Config[C], seeds []reflect.Type) ([]refl
 			return nil
 		}
 		state[t] = sdkVisitActive
+		if t.Kind() != reflect.Pointer && lookupSpecial(c, t) == nil &&
+			(t.Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(t).Implements(reflect.TypeFor[json.Marshaler]()) ||
+				t.Implements(reflect.TypeFor[encoding.TextMarshaler]()) || reflect.PointerTo(t).Implements(reflect.TypeFor[encoding.TextMarshaler]())) {
+			return fmt.Errorf("%s has a custom JSON or text marshaler; configure SpecialTypes", t)
+		}
 		if t.Kind() == reflect.Pointer {
 			if err := walk(t.Elem()); err != nil {
 				return err
@@ -154,14 +168,93 @@ func collectNamedContainers[C ~string](c *apispec.Config[C]) ([]reflect.Type, er
 
 // validateSDKTypes owns generated names and the selected targets' cycle policies.
 func validateSDKTypes[C ~string](c *apispec.Config[C], aliases []aliasInfo, out outputPaths) error {
+	if err := validateJSONWireFields(c); err != nil {
+		return err
+	}
+	if out.KotlinDir != "" || out.SwiftDir != "" {
+		for _, r := range c.Routes {
+			if !r.IsSSE {
+				continue
+			}
+			roots := []reflect.Type{r.Resp}
+			for _, event := range r.SSEEvents {
+				if event.Resp != nil {
+					roots = append(roots, event.Resp)
+				}
+			}
+			for _, root := range roots {
+				if root.Kind() == reflect.Pointer || root.Kind() == reflect.Slice || root.Kind() == reflect.Map {
+					return fmt.Errorf("nullable or byte-container SSE root %s is unsupported", root)
+				}
+			}
+		}
+	}
 	types, err := walkSDKTypes(c, sdkSeedTypes(c))
 	if err != nil {
 		return err
+	}
+	for _, special := range c.SpecialTypes {
+		if special.TSSource == "" && special.KotlinSource == "" && special.SwiftSource == "" {
+			continue
+		}
+		if (out.TypeScriptDir != "" && special.TSSource == "") || (out.KotlinDir != "" && special.KotlinSource == "") || (out.SwiftDir != "" && special.SwiftSource == "") {
+			return fmt.Errorf("custom source for %s is missing for a selected target", special.Type)
+		}
+		types = append(types, special.Type)
 	}
 	if err := validateSDKNames(c, aliases, types, out); err != nil {
 		return err
 	}
 	return validateSDKCycles(c, types, out)
+}
+
+// validateJSONWireFields rejects value-struct omitempty where Go always emits
+// the field. Query-only DTOs use independent query omission rules.
+func validateJSONWireFields[C ~string](c *apispec.Config[C]) error {
+	seeds := slices.Clone(c.ExtraSeeds)
+	for _, special := range c.SpecialTypes {
+		seeds = append(seeds, special.Dependencies...)
+	}
+	for _, r := range c.Routes {
+		if r.Req != nil {
+			seeds = append(seeds, r.Req)
+		}
+		if r.Resp != nil {
+			seeds = append(seeds, r.Resp)
+		}
+		for _, e := range r.SSEEvents {
+			if e.Resp != nil {
+				seeds = append(seeds, e.Resp)
+			}
+		}
+	}
+	types, err := walkSDKTypes(c, seeds)
+	if err != nil {
+		return err
+	}
+	for _, t := range types {
+		if t.Kind() != reflect.Struct || lookupSpecial(c, t) != nil {
+			continue
+		}
+		fields, err := jsonFields(c, t)
+		if err != nil {
+			return err
+		}
+		for _, f := range fields {
+			_, opts := parseJSONTag(f.field.Tag.Get("json"))
+			if f.field.Type.Kind() == reflect.Struct && slices.Contains(opts, "omitempty") && !slices.Contains(opts, "omitzero") {
+				return fmt.Errorf("%s.%s: omitempty does not omit value structs; use omitzero or an optional pointer", f.owner, f.field.Name)
+			}
+		}
+	}
+	return nil
+}
+
+type customSymbolsTarget struct {
+	language string
+	enabled  bool
+	symbols  []string
+	reserved map[string]struct{}
 }
 
 // validateSDKNames checks declaration identity and each selected output namespace.
@@ -176,7 +269,9 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 	names := map[string]reflect.Type{}
 	for _, t := range types {
 		_, alias := aliasNames[t.Name()]
-		if t.Kind() != reflect.Struct && t.Kind() != reflect.Slice && t.Kind() != reflect.Map && !alias {
+		special := lookupSpecial(c, t)
+		hasSource := special != nil && (special.TSSource != "" || special.KotlinSource != "" || special.SwiftSource != "")
+		if t.Kind() != reflect.Struct && t.Kind() != reflect.Slice && t.Kind() != reflect.Map && !alias && !hasSource {
 			continue
 		}
 		if prior, ok := names[t.Name()]; ok && prior != t {
@@ -195,6 +290,23 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 			names[a.name] = nil
 		}
 	}
+	queryNames := map[string]reflect.Type{}
+	for _, r := range c.Routes {
+		if r.Query == nil {
+			continue
+		}
+		name := r.Query.Name() + "Query"
+		if out.KotlinDir == "" && out.SwiftDir == "" {
+			continue
+		}
+		if prior, exists := names[name]; exists {
+			return fmt.Errorf("generated query type name %q for %s conflicts with %s", name, r.Query, prior)
+		}
+		if prior, exists := queryNames[name]; exists && prior != r.Query {
+			return fmt.Errorf("generated query type name %q is shared by %s and %s", name, prior, r.Query)
+		}
+		queryNames[name] = r.Query
+	}
 	tsImports := map[string]struct{}{}
 	for _, r := range c.Routes {
 		tsImports[r.Resp.Name()] = struct{}{}
@@ -210,19 +322,15 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 			}
 		}
 	}
-	if len(c.Routes) > 0 || c.MCPProtocolVersion != "" {
+	if len(c.Routes) > 0 {
 		tsImports[clientErrorModel(c).TypeName] = struct{}{}
 	}
 	if len(c.ErrorCodes) > 0 {
 		tsImports[reflect.TypeFor[C]().Name()] = struct{}{}
 	}
-	if c.MCPProtocolVersion != "" {
-		for _, n := range []string{"ClientCapabilities", "Implementation", "RequestMeta", "ServerDiscoverResult"} {
-			tsImports[n] = struct{}{}
-		}
-	}
+
 	tsReserved := map[string]struct{}{"ISOTimestamp": {}}
-	for _, n := range []string{"APIClient", "APIError", "AbortSignal", "Error", "EventSource", "FetchFn", "JSON", "MessageEvent", "Promise", "Record", "RequestInit", "Response", "String", "URLSearchParams", "globalThis"} {
+	for _, n := range []string{"APIClient", "APIError", "AbortSignal", "Error", "EventSource", "FetchFn", "JSON", "MessageEvent", "Omit", "Partial", "Pick", "Promise", "Record", "RequestInit", "Response", "String", "URLSearchParams", "globalThis"} {
 		if _, ok := tsImports[n]; ok {
 			tsReserved[n] = struct{}{}
 		}
@@ -251,8 +359,19 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 		if err != nil {
 			return err
 		}
+		docs := docRegistry[C]{cfg: c}
+		sseTypes, err := docs.discoverSSEStructs()
+		if err != nil {
+			return err
+		}
+		for _, sseType := range sseTypes {
+			if !slices.Contains(needed, sseType.Type) {
+				needed = append(needed, sseType.Type)
+			}
+		}
 		for _, t := range needed {
-			if t.Kind() != reflect.Struct {
+			special := lookupSpecial(c, t)
+			if t.Kind() != reflect.Struct && (special == nil || special.TSSource == "") {
 				if _, ok := aliasNames[t.Name()]; !ok {
 					continue
 				}
@@ -263,8 +382,30 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 			}
 		}
 	}
+	validators := map[string]struct{}{}
+	for _, special := range c.SpecialTypes {
+		name := special.TSValidator
+		if out.TypeScriptDir == "" || name == "" {
+			continue
+		}
+		if _, ok := validators[name]; ok {
+			return fmt.Errorf("duplicate TypeScript custom validator %q", name)
+		}
+		if _, ok := names[name]; ok {
+			return fmt.Errorf("TypeScript custom validator %q conflicts with a type", name)
+		}
+		if slices.Contains(typeScriptValidatorReservedNames, name) {
+			return fmt.Errorf("TypeScript custom validator %q conflicts with a generated declaration", name)
+		}
+		if suffix, ok := strings.CutPrefix(name, "validate"); ok {
+			if _, ok := names[suffix]; ok {
+				return fmt.Errorf("TypeScript custom validator %q conflicts with a generated declaration", name)
+			}
+		}
+		validators[name] = struct{}{}
+	}
 	ktReserved := map[string]struct{}{}
-	for _, n := range []string{"ApiClient", "ApiException", "Boolean", "Double", "Instant", "InstantSerializer", "Int", "JsonElement", "List", "Long", "Map", "String"} {
+	for _, n := range kotlinReservedNames {
 		ktReserved[n] = struct{}{}
 	}
 	swReserved := map[string]struct{}{}
@@ -273,7 +414,7 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 			swReserved[n] = struct{}{}
 		}
 	}
-	for _, n := range []string{"ApiClient", "ApiError", "Bool", "Double", "ISOTimestamp", "Int", "JSONValue", "String"} {
+	for _, n := range swiftReservedNames {
 		swReserved[n] = struct{}{}
 	}
 	// Private transport types only shadow DTOs referenced inside the client.
@@ -293,6 +434,31 @@ func validateSDKNames[C ~string](c *apispec.Config[C], aliases []aliasInfo, type
 	if len(c.ErrorCodes) == 0 {
 		ktReserved["ErrorCodes"] = struct{}{}
 		swReserved["ErrorCodes"] = struct{}{}
+	}
+	for _, special := range c.SpecialTypes {
+		for _, target := range []customSymbolsTarget{
+			{"Kotlin", out.KotlinDir != "", special.KotlinSymbols, ktReserved},
+			{"Swift", out.SwiftDir != "", special.SwiftSymbols, swReserved},
+		} {
+			if !target.enabled {
+				continue
+			}
+			for _, symbol := range target.symbols {
+				if !isIdentifier(symbol) {
+					return fmt.Errorf("invalid %s custom symbol %q", target.language, symbol)
+				}
+				if _, ok := names[symbol]; ok {
+					return fmt.Errorf("%s custom symbol %q conflicts with a type", target.language, symbol)
+				}
+				if _, ok := queryNames[symbol]; ok {
+					return fmt.Errorf("%s custom symbol %q conflicts with a query type", target.language, symbol)
+				}
+				if _, ok := target.reserved[symbol]; ok {
+					return fmt.Errorf("%s custom symbol %q conflicts with a generated declaration", target.language, symbol)
+				}
+				target.reserved[symbol] = struct{}{}
+			}
+		}
 	}
 	tsValues := map[string]struct{}{}
 	for _, a := range aliases {
@@ -449,6 +615,9 @@ func hasSSERoutes[C ~string](c *apispec.Config[C]) bool {
 func sdkSeedTypes[C ~string](c *apispec.Config[C]) []reflect.Type {
 	seeds := routeSeedTypes(c)
 	seeds = append(seeds, c.ExtraSeeds...)
+	for _, special := range c.SpecialTypes {
+		seeds = append(seeds, special.Dependencies...)
+	}
 	return seeds
 }
 
@@ -471,29 +640,34 @@ func tsPrimitiveValidator[C ~string](c *apispec.Config[C], t reflect.Type, pathE
 	}
 }
 
-// tsElemValidatorFunc returns a function expression (v: unknown) => validated
-// for use as the element validator callback in validateArray/validateRecord.
-func tsElemValidatorFunc[C ~string](c *apispec.Config[C], t reflect.Type, pathLit string) (string, error) {
-	if t.Kind() == reflect.Pointer {
-		return tsElemValidatorFunc(c, t.Elem(), pathLit)
-	}
-	if t.Kind() == reflect.Struct && isSDKPkg(c, t.PkgPath()) {
-		return "validate" + t.Name(), nil
-	}
-	v, err := tsPrimitiveValidator(c, t, "v", pathLit)
-	if err != nil {
-		return "", err
-	}
-	return "(v) => " + v, nil
-}
-
 // goTypeToDoc maps a Go reflect.Type to a TypeScript-style string for docs.
 func goTypeToDoc[C ~string](c *apispec.Config[C], t reflect.Type) (string, error) {
+	return goTypeToDocValue(c, t, true)
+}
+
+func goTypeToDocValue[C ~string](c *apispec.Config[C], t reflect.Type, nullable bool) (string, error) {
 	if t.Kind() == reflect.Pointer {
-		return goTypeToDoc(c, t.Elem())
+		inner, err := goTypeToDocValue(c, t.Elem(), true)
+		if err != nil {
+			return "", err
+		}
+		if nullable && !strings.HasSuffix(inner, " | null") {
+			inner += " | null"
+		}
+		return inner, nil
+	}
+	if nullable && (t.Kind() == reflect.Slice || t.Kind() == reflect.Map) {
+		inner, err := goTypeToDocValue(c, t, false)
+		if err != nil {
+			return "", err
+		}
+		return inner + " | null", nil
 	}
 	if m := lookupSpecial(c, t); m != nil {
 		return m.DocType, nil
+	}
+	if jsonByteSlice(t) {
+		return "base64 string", nil
 	}
 	if (t.Kind() == reflect.Slice || t.Kind() == reflect.Map) && t.Name() != "" && isSDKPkg(c, t.PkgPath()) {
 		return t.Name(), nil
@@ -523,6 +697,9 @@ func goTypeToDoc[C ~string](c *apispec.Config[C], t reflect.Type) (string, error
 		e, err := goTypeToDoc(c, t.Elem())
 		if err != nil {
 			return "", err
+		}
+		if strings.Contains(e, " | ") {
+			e = "(" + e + ")"
 		}
 		return e + "[]", nil
 	case reflect.Struct:

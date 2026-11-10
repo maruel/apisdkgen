@@ -53,15 +53,16 @@ function validateRecord<T>(v: ValidatorInput, path: string, valValidator: ValueV
   }
   const result: Record<string, T> = {};
   for (const k of Object.keys(v as ObjectValue)) {
-    result[k] = valValidator((v as ObjectValue)[k]);
+    Object.defineProperty(result, k, { value: valValidator((v as ObjectValue)[k]), enumerable: true, writable: true, configurable: true });
   }
   return result;
 }
 
 export function validatetestSDKEvent(raw: ValidatorInput): testSDKEvent {
   const obj = asObject(raw, "testSDKEvent");
+  if (!Object.prototype.hasOwnProperty.call(obj, "kind")) throw new TypeError("missing required field: testSDKEvent.kind");
   return {
     kind: asString(obj["kind"], "testSDKEvent.kind"),
-    text: (obj["text"] === undefined || obj["text"] === null ? undefined : asString(obj["text"], "testSDKEvent.text")),
+    ...(Object.prototype.hasOwnProperty.call(obj, "text") ? { text: asString(obj["text"], "testSDKEvent.text") } : {}),
   };
 }

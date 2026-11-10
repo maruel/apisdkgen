@@ -16,6 +16,13 @@ async function main() {
   await client.list("blank", {...query, text: ""});
   await client.list("empty", { extra: "ignored" });
   await client.update(query, {kind: "request"}, {"X-Test": "expected"});
+  await client.reuse(query, {limit:null, unread:null, text:null, ids:null, extra:"body"});
+  if (await client.rootList(null) !== null || await client.rootMap(null) !== null || await client.rootArray() !== null) throw new Error("nullable root");
+  await client.queryOnlyEmpty({}); await client.queryOnlyValue({since:"x"});
+  if (await client.rootBytesHeaders({"X-Test":"expected"}) !== "AAH/") throw new Error("header byte response");
+  if (await client.rootBytes("AAH/") !== "AAH/" || JSON.stringify(await client.rootNestedBytes(["AAH/", null])) !== '["AAH/",null]') throw new Error("base64 root");
+  if (JSON.stringify(await client.rootBytesMap({x:"AAH/", empty:null})) !== '{"empty":null,"x":"AAH/"}') throw new Error("base64 map root");
+  if ((await client.rootList([]))?.length !== 0 || Object.keys((await client.rootMap({})) ?? {x:1}).length !== 0) throw new Error("empty root");
   client.events(query, {onMessage() {}, onError(error) { throw error; }});
   client.namedEvents(query, {onMessage() {}, onError(error) { throw error; }});
   for (const url of urls) {

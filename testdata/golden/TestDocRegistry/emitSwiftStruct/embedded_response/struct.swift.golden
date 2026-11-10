@@ -2,4 +2,10 @@ public struct testTSEmbeddedResponse: Codable {
     public let limit: Int
     public let id: String
     public let name: String
+
+    public init(limit: Int, id: String, name: String) {
+        self.limit = limit
+        self.id = id
+        self.name = name
+    }
 }

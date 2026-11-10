@@ -13,6 +13,10 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.serializer
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -44,7 +48,7 @@ class ApiClient(
     private val json = Json { ignoreUnknownKeys = true }
     private val jsonMediaType = "application/json".toMediaType()
 
-    private suspend inline fun <reified T> request(method: String, path: String, body: String? = null, headers: Map<String, String> = emptyMap()): T {
+    private suspend inline fun <reified T> request(method: String, path: String, body: String? = null, headers: Map<String, String> = emptyMap(), crossinline decode: (String) -> T = { json.decodeFromString<T>(it) }): T {
         val url = "$baseURL$path"
         val needsBody = method in listOf("POST", "PUT", "PATCH")
         val requestBody = body?.toRequestBody(jsonMediaType)
@@ -79,7 +83,7 @@ class ApiClient(
                                 }
                                 throw failure
                             }
-                            json.decodeFromString<T>(responseBody)
+                            decode(responseBody)
                         }
                     } catch (e: Exception) {
                         cont.resumeWithException(e)
@@ -106,18 +110,17 @@ class ApiClient(
         }
     }
 
-    private inline fun <reified T> sseFlow(
-        path: String,
-        method: String = "GET",
-        body: String? = null,
-        headers: Map<String, String> = emptyMap(),
-    ): Flow<T> = callbackFlow {
+    private inline fun <reified T> sseFlow(path: String): Flow<T> = stream(path) { json.decodeFromString<T>(it) }
+
+    /** Opens a cold event stream, decoding each data frame with the supplied function. */
+    fun <T> stream(path: String, method: String = "GET", body: String? = null, headers: Map<String, String> = emptyMap(), decode: (String) -> T): Flow<T> = callbackFlow {
         val requestBody = body?.toRequestBody(jsonMediaType)
+            ?: if (method in listOf("PATCH", "POST", "PROPPATCH", "PUT", "REPORT")) "".toRequestBody(null) else null
         val request = Request.Builder()
             .url("$baseURL$path")
             .header("Accept", "text/event-stream")
             .apply {
-                if (requestBody != null) header("Content-Type", "application/json")
+                if (body != null) header("Content-Type", "application/json")
                 headers.forEach { (name, value) -> header(name, value) }
                 tokenProvider?.invoke()?.let { header("Authorization", "Bearer $it") }
             }
@@ -127,7 +130,7 @@ class ApiClient(
         val source = factory.newEventSource(request, object : EventSourceListener() {
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
                 try {
-                    val event = json.decodeFromString<T>(data)
+                    val event = decode(data)
                     // OkHttp invokes this on an IO callback thread; suspend reads until delivery.
                     trySendBlocking(event).getOrThrow()
                 } catch (e: Exception) {

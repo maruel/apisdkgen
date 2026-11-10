@@ -5,7 +5,10 @@ package apisdkgen
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,11 +22,313 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/maruel/apisdkgen/apispec"
+	"github.com/maruel/apisdkgen/testdata/mcpschematest"
 )
 
-type testJSONRPCRequest struct{}
+type testNamedBytes []byte
 
-type testJSONRPCResponse struct{}
+type testAlwaysNonzeroList []int
+
+func (testAlwaysNonzeroList) IsZero() bool { return false }
+
+type testJSONKeys struct {
+	Proto       *string            `json:"__proto__,omitempty"`
+	Constructor *string            `json:"constructor,omitempty"`
+	Values      map[string]*string `json:"values"`
+	Fixed       [1]string          `json:"fixed,omitempty"`
+	Empty       [0]string          `json:"empty,omitempty"`
+}
+
+type testJSONWire struct {
+	Required    *string               `json:"required"`
+	List        []int                 `json:"list"`
+	Bytes       []byte                `json:"bytes"`
+	NamedBytes  testNamedBytes        `json:"namedBytes"`
+	Raw         json.RawMessage       `json:"raw"`
+	Lookup      map[string]*int       `json:"lookup"`
+	Omitted     *string               `json:"omitted,omitempty"`
+	Container   *map[string]int       `json:"container,omitempty"`
+	PointerZero *int                  `json:"pointerZero,omitzero"`
+	ZeroList    testAlwaysNonzeroList `json:"zeroList,omitzero"`
+	RawOptional json.RawMessage       `json:"rawOptional,omitempty"`
+	C           string                `json:"c"`
+	Decoder     string                `json:"decoder"`
+	Encoder     string                `json:"encoder"`
+	CodingKeys  string                `json:"CodingKeys"`
+	Tree        testRecursiveTree     `json:"tree"`
+}
+
+// TestJSONWireContract compiles and runs generated validation against Go's JSON output.
+func TestJSONWireContract(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	typ := reflect.TypeFor[testJSONWire]()
+	cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, SpecialTypes: []apispec.SpecialType{{Type: reflect.TypeFor[json.RawMessage](), TSType: "unknown", KTType: "JsonElement", SwiftType: "JSONValue", DocType: "JSONValue", TSValidate: "%[1]s"}, {Type: reflect.TypeFor[[1]string](), TSType: "string[]", DocType: "string[]", TSValidate: "(%[1]s as string[])"}, {Type: reflect.TypeFor[[0]string](), TSType: "string[]", DocType: "string[]", TSValidate: "(%[1]s as string[])"}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}, {Name: "keys", Path: "/keys", Resp: reflect.TypeFor[testJSONKeys](), IsSSE: true}}}
+	api := NewAPI(dir, "WireSDK", NewVersion("v1", ".", cfg))
+	api.Languages = []Language{TypeScript}
+	if err := api.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	dir = filepath.Join(dir, "ts", "v1")
+	var nilMap map[string]int
+	zero := 0
+	payload, err := json.Marshal(testJSONWire{PointerZero: &zero, Lookup: map[string]*int{"nil": nil}, Bytes: []byte{0, 1, 255}, Container: &nilMap, RawOptional: json.RawMessage("null"), C: "c", Decoder: "decoder", Encoder: "encoder", CodingKeys: "keys", Tree: testRecursiveTree{Children: []testRecursiveTree{{Children: []testRecursiveTree{{}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyMap := map[string]int{}
+	emptyPayload, err := json.Marshal(testJSONWire{List: []int{}, Bytes: []byte{}, NamedBytes: testNamedBytes{}, Lookup: map[string]*int{}, Container: &emptyMap, ZeroList: testAlwaysNonzeroList{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proto := "special"
+	keysPayload, err := json.Marshal(testJSONKeys{Proto: &proto, Values: map[string]*string{"__proto__": nil, "constructor": nil}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fmt.Sprintf(`import {validatetestJSONWire, validatetestJSONKeys} from "./validate.gen";
+import type {testJSONWire} from "./types.gen";
+const data: testJSONWire = JSON.parse(%q) as testJSONWire;
+const parsed = validatetestJSONWire(data);
+const empty = validatetestJSONWire(JSON.parse(%q));
+if (empty.list?.length !== 0 || empty.bytes !== "" || empty.namedBytes !== "" || Object.keys(empty.lookup ?? {x:1}).length !== 0 || empty.container === null || Object.keys(empty.container ?? {x:1}).length !== 0 || empty.zeroList?.length !== 0 || "rawOptional" in empty) throw new Error("empty values changed");
+if (parsed.required !== null || parsed.list !== null || parsed.bytes !== "AAH/" || parsed.raw !== null || parsed.lookup?.nil !== null || parsed.container !== null || parsed.zeroList !== null || parsed.rawOptional !== null || parsed.c !== "c" || parsed.tree.children?.[0]?.children?.length !== 1 || parsed.pointerZero !== 0 || parsed.omitted !== undefined || "omitted" in parsed) throw new Error("wire values changed");
+let rejected = false;
+try { validatetestJSONWire({...data, omitted: null}); } catch { rejected = true; }
+if (!rejected) throw new Error("invalid optional null accepted");
+const {raw: _raw, ...withoutRaw} = data;
+rejected = false;
+try { validatetestJSONWire(withoutRaw); } catch { rejected = true; }
+if (!rejected) throw new Error("missing required raw value accepted");
+const keys = validatetestJSONKeys(JSON.parse(%q));
+if (!Object.prototype.hasOwnProperty.call(keys, "__proto__") || keys.__proto__ !== "special" || Object.prototype.hasOwnProperty.call(keys, "constructor") || keys.values === null || !Object.prototype.hasOwnProperty.call(keys.values, "__proto__") || keys.values.__proto__ !== null || keys.values.constructor !== null || keys.fixed[0] !== "" || Object.prototype.hasOwnProperty.call(keys, "empty")) throw new Error("special JSON keys changed");
+rejected = false; try { validatetestJSONKeys({values:{}}); } catch { rejected = true; }
+if (!rejected) throw new Error("nonempty fixed array incorrectly optional");
+const {required: _required, ...withoutRequired} = data;
+// @ts-expect-error required must be present even when every other field is supplied
+const missing: testJSONWire = withoutRequired;
+void missing;
+rejected = false; try { validatetestJSONWire(withoutRequired); } catch { rejected = true; }
+if (!rejected) throw new Error("missing required pointer accepted");
+`, payload, emptyPayload, keysPayload)
+	if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := t.TempDir()
+	// #nosec G204 -- Fixed compiler reads only generated files in private directories.
+	cmd := exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tsc: %v\n%s", err, out)
+	}
+	// #nosec G204 G702 -- The script is generated in the test's private directory.
+	cmd = exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js"))
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+type testDiscriminator struct {
+	Kind string  `json:"kind"`
+	Text *string `json:"text,omitempty"`
+}
+
+func TestDiscriminatorWireContract(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testDiscriminator]()
+	cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, Discriminated: []string{typ.Name()}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+	dir := t.TempDir()
+	api := NewAPI(dir, "WireSDK", NewVersion("v1", ".", cfg))
+	api.Languages = []Language{TypeScript}
+	if err := api.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	dir = filepath.Join(dir, "ts", "v1")
+	empty := ""
+	payload, err := json.Marshal(testDiscriminator{Kind: "text", Text: &empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fmt.Sprintf(`import {validatetestDiscriminator} from "./validate.gen";
+const parsed = validatetestDiscriminator(%s);
+if (parsed.kind !== "text" || parsed.text !== "") throw new Error("empty payload lost");
+for (const value of [{kind:"text"}, {kind:"text",text:null}]) {
+ let failed = false; try { validatetestDiscriminator(value); } catch { failed = true; }
+ if (!failed) throw new Error("invalid variant accepted");
+}
+if (validatetestDiscriminator({kind:"future"}).kind !== "future") throw new Error("unknown kind rejected");`, payload)
+	if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := t.TempDir()
+	// #nosec G204 -- Fixed compiler reads generated test data in a private directory.
+	compile := exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts")
+	compile.Dir = dir
+	if out, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("tsc: %v\n%s", err, out)
+	}
+	// #nosec G204 G702 -- Execute the generated private test script.
+	run := exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js"))
+	run.Dir = dir
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+func TestEnumDiscriminatorWireContract(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testEnvelope]()
+	cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, Discriminated: []string{typ.Name()}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+	d := &docRegistry[string]{cfg: &cfg, aliases: []aliasInfo{{name: "testEnvelopeKind", constants: []aliasConstant{{name: "testEnvelopeKindText", value: "text"}}}}, aliasNames: map[string]struct{}{"testEnvelopeKind": {}}}
+	out := &preparedOutput{files: map[string]string{}}
+	dir := t.TempDir()
+	if err := d.generateTSTypes(dir, out); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.generateTSValidate(dir, out); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range out.files {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	label := ""
+	payload, err := json.Marshal(testEnvelope{Kind: "text", Label: &label, Source: testEnvelopeSource{Agent: "a"}, Text: &testEnvelopePayload{Text: ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := fmt.Sprintf(`import {validatetestEnvelope} from "./validate.gen";
+const valid=validatetestEnvelope(JSON.parse(%q));
+if (valid.kind !== "text" || valid.text?.text !== "" || valid.label !== "" || valid.source?.agent !== "a") throw new Error("enum metadata lost");
+let failed=false;try { validatetestEnvelope({kind:"text",label:""}); } catch { failed=true; }
+if (!failed) throw new Error("missing variant accepted");
+const unknown=validatetestEnvelope({kind:"future",label:"retained"});
+if ((unknown.kind as string) !== "future" || unknown.label !== "retained") throw new Error("unknown metadata lost");`, payload)
+	if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := t.TempDir()
+	// #nosec G204 -- Fixed compiler consumes test-generated sources in a private directory.
+	compile := exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", runtimeDir, "consumer.ts")
+	compile.Dir = dir
+	if output, err := compile.CombinedOutput(); err != nil {
+		t.Fatalf("tsc: %v\n%s", err, output)
+	}
+	// #nosec G204 G702 -- Script is generated in the private test directory.
+	run := exec.CommandContext(t.Context(), "node", filepath.Join(runtimeDir, "consumer.js"))
+	run.Dir = dir
+	if output, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, output)
+	}
+}
+
+// TestNativeJSONWireContract verifies native JSON encoding and decoding against Go output.
+func TestNativeJSONWireContract(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeFor[testJSONWire]()
+	var nilMap map[string]int
+	zero := 0
+	payload, err := json.Marshal(testJSONWire{PointerZero: &zero, Lookup: map[string]*int{"nil": nil}, Bytes: []byte{0, 1, 255}, Container: &nilMap, RawOptional: json.RawMessage("null"), C: "c", Decoder: "decoder", Encoder: "encoder", CodingKeys: "keys", Tree: testRecursiveTree{Children: []testRecursiveTree{{Children: []testRecursiveTree{{}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyMap := map[string]int{}
+	emptyPayload, err := json.Marshal(testJSONWire{List: []int{}, Bytes: []byte{}, NamedBytes: testNamedBytes{}, Lookup: map[string]*int{}, Container: &emptyMap, ZeroList: testAlwaysNonzeroList{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lang := range []Language{Kotlin, Swift} {
+		t.Run(string(lang), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, KotlinPackage: "wirecheck", SpecialTypes: []apispec.SpecialType{{Type: reflect.TypeFor[json.RawMessage](), TSType: "unknown", KTType: "JsonElement", SwiftType: "JSONValue", DocType: "JSONValue", TSValidate: "%[1]s"}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true}}}
+			api := NewAPI(dir, "WireSDK", NewVersion("v1", ".", cfg))
+			api.Languages = []Language{lang}
+			if err := api.Generate(); err != nil {
+				t.Fatal(err)
+			}
+			payloadFile := filepath.Join(dir, "payload.json")
+			if err := os.WriteFile(payloadFile, payload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			emptyFile := filepath.Join(dir, "empty.json")
+			if err := os.WriteFile(emptyFile, emptyPayload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var cmds []*exec.Cmd
+			if lang == Kotlin {
+				cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+				if cp == "" {
+					t.Skip("Kotlin runtime dependencies unavailable")
+				}
+				dir = filepath.Join(dir, "kotlin", "src", "main", "kotlin", "wirecheck")
+				source := `package wirecheck
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+fun main(args: Array<String>) {
+ val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+ val payload = java.io.File(args[0]).readText()
+ val decoded = json.decodeFromString<testJSONWire>(payload)
+ val empty = json.decodeFromString<testJSONWire>(java.io.File(args[1]).readText())
+ check(empty.list?.isEmpty() == true && empty.bytes?.isEmpty() == true && empty.namedBytes?.isEmpty() == true && empty.lookup?.isEmpty() == true && empty.container == JSONPresence.Value(emptyMap<String, Int>()) && empty.zeroList == JSONPresence.Value(emptyList<Int>()) && empty.rawOptional == JSONPresence.Missing)
+ check(decoded.required == null && decoded.list == null && decoded.bytes?.contentEquals(byteArrayOf(0,1,-1)) == true && decoded.lookup?.get("nil") == null && decoded.container == JSONPresence.Null && decoded.zeroList == JSONPresence.Null && decoded.rawOptional == JSONPresence.Null && decoded.c == "c" && decoded.tree.children?.get(0)?.children?.size == 1 && decoded.pointerZero == 0)
+ val encoded = json.parseToJsonElement(json.encodeToString(decoded)).jsonObject
+ check(encoded.containsKey("required") && encoded["required"].toString() == "null" && encoded["bytes"].toString() == "\"AAH/\"" && encoded["container"].toString() == "null" && encoded["zeroList"].toString() == "null" && encoded["rawOptional"].toString() == "null" && !encoded.containsKey("omitted"))
+ val missing = json.decodeFromString<testJSONWire>("""{"required":null,"list":null,"bytes":null,"namedBytes":null,"raw":null,"lookup":null,"c":"c","decoder":"decoder","encoder":"encoder","CodingKeys":"keys","tree":{}}""")
+ check(missing.container == JSONPresence.Missing)
+ val populated = missing.copy(container=JSONPresence.Value(mapOf("x" to 2)))
+ check(json.decodeFromString<testJSONWire>(json.encodeToString(populated)).container == JSONPresence.Value(mapOf("x" to 2)))
+ check(runCatching { json.decodeFromString<testJSONWire>("""{"list":null,"bytes":null,"namedBytes":null,"raw":null,"lookup":null,"c":"c","decoder":"decoder","encoder":"encoder","CodingKeys":"keys","tree":{}}""") }.isFailure)
+}
+`
+				if err := os.WriteFile(filepath.Join(dir, "WireTest.kt"), []byte(source), 0600); err != nil {
+					t.Fatal(err)
+				}
+				// #nosec G204 G702 -- Fixed compiler and runtime consume generated sources in a private directory.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN"), "Types.kt", "WireTest.kt", "-include-runtime", "-d", "wire.jar"), exec.CommandContext(t.Context(), "java", "-cp", "wire.jar"+string(os.PathListSeparator)+cp, "wirecheck.WireTestKt", payloadFile, emptyFile)}
+			} else {
+				if _, err := exec.LookPath("swiftc"); err != nil {
+					t.Skip("Swift compiler unavailable")
+				}
+				dir = filepath.Join(dir, "swift", "Sources", "WireSDKV1")
+				source := `import Foundation
+@main struct WireTest {
+ static func main() throws {
+  let decoder = JSONDecoder(); let encoder = JSONEncoder()
+  let decoded = try decoder.decode(testJSONWire.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
+  let empty = try decoder.decode(testJSONWire.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
+  guard empty.list?.isEmpty == true && empty.bytes?.isEmpty == true && empty.namedBytes?.isEmpty == true && empty.lookup?.isEmpty == true, case .value(let map) = empty.container, map.isEmpty, case .value(let list) = empty.zeroList, list.isEmpty, case .missing = empty.rawOptional else { fatalError("empty contract") }
+  guard decoded.required == nil && decoded.list == nil && decoded.bytes == Data([0,1,255]) && decoded.pointerZero == 0 && decoded.c == "c" && decoded.decoder == "decoder" && decoded.encoder == "encoder" && decoded.CodingKeys == "keys" && decoded.tree.children?.first?.children?.count == 1, case .null = decoded.container, case .null = decoded.zeroList, case .null = decoded.rawOptional else { fatalError("null contract") }
+  let encoded = try JSONSerialization.jsonObject(with: encoder.encode(decoded)) as! [String: Any]
+  guard encoded["required"] is NSNull && encoded["container"] is NSNull && encoded["zeroList"] is NSNull && encoded["rawOptional"] is NSNull && encoded["c"] as? String == "c" && encoded["omitted"] == nil else { fatalError("encode contract") }
+  let missing = try decoder.decode(testJSONWire.self, from: Data(#"{"required":null,"list":null,"bytes":null,"namedBytes":null,"raw":null,"lookup":null,"c":"c","decoder":"decoder","encoder":"encoder","CodingKeys":"keys","tree":{}}"#.utf8))
+  guard case .missing = missing.container else { fatalError("missing contract") }
+  let populated = testJSONWire(required: nil, list: nil, bytes: nil, namedBytes: nil, raw: nil, lookup: nil, container: .value(["x": 2]), c: "c", decoder: "decoder", encoder: "encoder", CodingKeys: "keys", tree: testRecursiveTree())
+  let roundTrip = try decoder.decode(testJSONWire.self, from: encoder.encode(populated))
+  guard case .value(let value) = roundTrip.container, value["x"] == 2 else { fatalError("value contract") }
+  do { _ = try decoder.decode(testJSONWire.self, from: Data(#"{"list":null,"bytes":null,"namedBytes":null,"raw":null,"lookup":null,"c":"c","decoder":"decoder","encoder":"encoder","CodingKeys":"keys","tree":{}}"#.utf8)); fatalError("missing required accepted") } catch {}
+ }
+}
+`
+				if err := os.WriteFile(filepath.Join(dir, "WireTest.swift"), []byte(source), 0600); err != nil {
+					t.Fatal(err)
+				}
+				// #nosec G204 G702 -- Fixed compiler and runtime consume generated sources in a private directory.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "swiftc", "-parse-as-library", "Types.swift", "WireTest.swift", "-o", "wire"), exec.CommandContext(t.Context(), filepath.Join(dir, "wire"), payloadFile, emptyFile)}
+			}
+			for _, cmd := range cmds {
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v\n%s", cmd.Path, err, out)
+				}
+			}
+		})
+	}
+}
 
 type State string
 type testAuthKind string
@@ -33,7 +338,18 @@ type testSDKEvent struct {
 	Text string `json:"text,omitempty"`
 }
 
+type testRootList []int
+type testRootMap map[string]int
+type testRootBytes []byte
+type testRootNestedBytes [][]byte
+type testRootBytesMap map[string][]byte
+
 type testQueryIDs []string
+
+type testQueryScalar struct{ Value string }
+type testStructOnlyQuery struct {
+	Since testQueryScalar `json:"since,omitempty" query:"since"` //nolint:modernize // Query omitempty is meaningful for mapped structs.
+}
 
 type testQueryInput struct {
 	Path  string        `json:"-" path:"id"`
@@ -154,10 +470,10 @@ func TestGoTypeToDoc(t *testing.T) {
 		typ  reflect.Type
 		want string
 	}{
-		{name: "string boolean map", typ: reflect.TypeFor[map[string]bool](), want: "Record<string, boolean>"},
-		{name: "string value map", typ: reflect.TypeFor[map[string]string](), want: "Record<string, string>"},
-		{name: "raw JSON map", typ: reflect.TypeFor[map[string]json.RawMessage](), want: "Record<string, JSONValue>"},
-		{name: "any map", typ: reflect.TypeFor[map[string]any](), want: "Record<string, JSONValue>"},
+		{name: "string boolean map", typ: reflect.TypeFor[map[string]bool](), want: "Record<string, boolean> | null"},
+		{name: "string value map", typ: reflect.TypeFor[map[string]string](), want: "Record<string, string> | null"},
+		{name: "raw JSON map", typ: reflect.TypeFor[map[string]json.RawMessage](), want: "Record<string, JSONValue | null> | null"},
+		{name: "any map", typ: reflect.TypeFor[map[string]any](), want: "Record<string, JSONValue> | null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -335,7 +651,7 @@ func TestDocRegistry(t *testing.T) {
 				if err := d.emitTSStruct(&b, reflect.TypeFor[testTSTaggedRequest]()); err != nil {
 					t.Fatal(err)
 				}
-				if got, want := b.String(), "export interface testTSTaggedRequest {\n  IDs: string;\n  name: string;\n}\n"; got != want {
+				if got, want := b.String(), "export interface testTSTaggedRequest {\n  IDs: string | null;\n  name: string;\n}\n"; got != want {
 					t.Fatalf("got %q, want %q", got, want)
 				}
 			})
@@ -484,40 +800,7 @@ func TestDocRegistry(t *testing.T) {
 			assertGolden(t, "API.md", data)
 		})
 	})
-	t.Run("writeKotlinClient", func(t *testing.T) {
-		t.Run("MCP", func(t *testing.T) {
-			t.Parallel()
-
-			outDir := "generated"
-			out := &preparedOutput{files: map[string]string{}}
-			docs := &docRegistry[string]{
-				cfg: &apispec.Config[string]{
-					Routes: []apispec.Route{
-						{
-							Name:       "mcp",
-							Method:     "POST",
-							Path:       "",
-							Req:        reflect.TypeFor[testJSONRPCRequest](),
-							Resp:       reflect.TypeFor[testJSONRPCResponse](),
-							HeadersArg: true,
-						},
-					},
-					KotlinPackage:      "com.example.mcp",
-					MCPProtocolVersion: "2026-07-28",
-					ErrorModel: apispec.ClientErrorModel{
-						TypeName:      "JSONRPCResponse",
-						KTCodeExpr:    "err.error?.code?.toString() ?: \"UNKNOWN\"",
-						KTMessageExpr: "err.error?.message ?: \"\"",
-						KTDetailsExpr: "null",
-					},
-				},
-			}
-			if err := docs.writeKotlinClient(outDir, out); err != nil {
-				t.Fatal(err)
-			}
-			content := out.files[filepath.Join(outDir, "ApiClient.kt")]
-			assertGolden(t, "ApiClient.kt", content)
-		})
+	t.Run("writeKotlinClient", func(t *testing.T) { //nolint:dupl // Kotlin and Swift clients need parallel SSE golden coverage.
 		t.Run("query routes", func(t *testing.T) {
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{
 				KotlinPackage: "example.api",
@@ -534,7 +817,7 @@ func TestDocRegistry(t *testing.T) {
 			data := out.files[filepath.Join(dir, "ApiClient.kt")]
 			assertGolden(t, "ApiClient.kt", data)
 		})
-		t.Run("named events", func(t *testing.T) { //nolint:dupl // Each language must exercise the same SSE contract.
+		t.Run("named events", func(t *testing.T) {
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
 				{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
 				{Name: "stats", Handler: "onStats", Resp: reflect.TypeFor[testSDKEvent]()},
@@ -650,7 +933,7 @@ func TestDocRegistry(t *testing.T) {
 			assertGolden(t, "validate.gen.ts", data)
 		})
 	})
-	t.Run("writeSwiftClient", func(t *testing.T) {
+	t.Run("writeSwiftClient", func(t *testing.T) { //nolint:dupl // Kotlin and Swift clients need parallel SSE golden coverage.
 		t.Run("query routes", func(t *testing.T) {
 			d := &docRegistry[string]{cfg: &apispec.Config[string]{
 				KotlinPackage: "example.api",
@@ -667,7 +950,7 @@ func TestDocRegistry(t *testing.T) {
 			data := out.files[filepath.Join(dir, "ApiClient.swift")]
 			assertGolden(t, "ApiClient.swift", data)
 		})
-		t.Run("named events", func(t *testing.T) { //nolint:dupl // Each language must exercise the same SSE contract.
+		t.Run("named events", func(t *testing.T) {
 			r := apispec.Route{Name: "events", Path: "/events", Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, QueryParams: []string{"cursor"}, SSEEvents: []apispec.SSEEvent{
 				{Name: "checkpoint", Handler: "onCheckpoint", Resp: reflect.TypeFor[testSSECheckpoint]()},
 				{Name: "stats", Handler: "onStats", Resp: reflect.TypeFor[testSDKEvent]()},
@@ -1220,10 +1503,20 @@ if (false) client.rawEvents("", handlers);
 					APIDocTitle:     "Typed query fixture",
 					ExtraSeeds:      []reflect.Type{reflect.TypeFor[testSSEError]()},
 					ErrorModel:      apispec.ClientErrorModel{TypeName: "testSSEError", TSCodeExpr: `"UNKNOWN"`, TSMessageExpr: "err.message", TSDetailsExpr: "undefined", KTCodeExpr: `"UNKNOWN"`, KTMessageExpr: "err.message", KTDetailsExpr: "null", SwiftCodeExpr: `"UNKNOWN"`, SwiftMessageExpr: "errResp.message", SwiftDetailsExpr: "nil"},
-					SpecialTypes:    []apispec.SpecialType{{Type: reflect.TypeFor[testQueryIDs](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}},
+					SpecialTypes:    []apispec.SpecialType{{Type: reflect.TypeFor[testQueryIDs](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}, {Type: reflect.TypeFor[testQueryScalar](), TSType: "string", KTType: "String", SwiftType: "String", DocType: "string"}},
 					Routes: []apispec.Route{
 						{Name: "list", Method: "GET", Path: "/items/{queryPath}", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent]()},
 						{Name: "update", Method: "POST", Path: "/items", Query: reflect.TypeFor[testQueryInput](), Req: reflect.TypeFor[testSDKEvent](), Resp: reflect.TypeFor[testSDKEvent](), HeadersArg: true},
+						{Name: "reuse", Method: "POST", Path: "/reuse", Query: reflect.TypeFor[testQueryInput](), Req: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent]()},
+						{Name: "rootList", Method: "POST", Path: "/root-list", Req: reflect.TypeFor[testRootList](), Resp: reflect.TypeFor[testRootList]()},
+						{Name: "rootMap", Method: "POST", Path: "/root-map", Req: reflect.TypeFor[testRootMap](), Resp: reflect.TypeFor[testRootMap]()},
+						{Name: "rootBytes", Method: "POST", Path: "/root-bytes", Req: reflect.TypeFor[testRootBytes](), Resp: reflect.TypeFor[testRootBytes]()},
+						{Name: "rootBytesHeaders", Method: "GET", Path: "/root-bytes-headers", Resp: reflect.TypeFor[testRootBytes](), HeadersArg: true},
+						{Name: "queryOnlyEmpty", Method: "GET", Path: "/query-only-empty", Query: reflect.TypeFor[testStructOnlyQuery](), Resp: reflect.TypeFor[testSDKEvent]()},
+						{Name: "queryOnlyValue", Method: "GET", Path: "/query-only-value", Query: reflect.TypeFor[testStructOnlyQuery](), Resp: reflect.TypeFor[testSDKEvent]()},
+						{Name: "rootNestedBytes", Method: "POST", Path: "/root-nested", Req: reflect.TypeFor[testRootNestedBytes](), Resp: reflect.TypeFor[testRootNestedBytes]()},
+						{Name: "rootBytesMap", Method: "POST", Path: "/root-bytes-map", Req: reflect.TypeFor[testRootBytesMap](), Resp: reflect.TypeFor[testRootBytesMap]()},
+						{Name: "rootArray", Method: "GET", Path: "/root-array", Resp: reflect.TypeFor[testSDKEvent](), IsArray: true},
 						{Name: "events", Path: "/events", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true},
 						{Name: "namedEvents", Path: "/events", Query: reflect.TypeFor[testQueryInput](), Resp: reflect.TypeFor[testSDKEvent](), IsSSE: true, SSEEvents: []apispec.SSEEvent{{Name: "ready", Handler: "onReady"}}},
 					},
@@ -1256,8 +1549,51 @@ if (false) client.rawEvents("", handlers);
 					assertGolden(t, "API.md", string(doc))
 				}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasPrefix(r.URL.Path, "/root-") {
+						if r.URL.Path == "/root-bytes-headers" {
+							if r.Header.Get("X-Test") != "expected" {
+								t.Error("missing header")
+								http.Error(w, "bad header", http.StatusBadRequest)
+								return
+							}
+							if err := json.NewEncoder(w).Encode(testRootBytes{0, 1, 255}); err != nil {
+								t.Errorf("encode bytes: %v", err)
+							}
+							return
+						}
+						var value any
+						switch r.URL.Path {
+						case "/root-list":
+							value = new(testRootList)
+						case "/root-map":
+							value = new(testRootMap)
+						case "/root-bytes":
+							value = new(testRootBytes)
+						case "/root-nested":
+							value = new(testRootNestedBytes)
+						case "/root-bytes-map":
+							value = new(testRootBytesMap)
+						case "/root-array":
+							value = new([]testSDKEvent)
+						}
+						if r.Method == http.MethodPost {
+							if err := json.NewDecoder(r.Body).Decode(value); err != nil {
+								t.Errorf("root body: %v", err)
+								http.Error(w, "invalid", http.StatusBadRequest)
+								return
+							}
+						}
+						if err := json.NewEncoder(w).Encode(value); err != nil {
+							t.Errorf("encode root: %v", err)
+						}
+						return
+					}
 					want := url.Values{"limit": {"0"}, "unread_only": {"false"}, "q": {"a +&雪"}, "ids": {"a,b"}}
 					switch r.URL.Path {
+					case "/query-only-empty":
+						want = url.Values{}
+					case "/query-only-value":
+						want = url.Values{"since": {"x"}}
 					case "/items/blank":
 						want.Set("q", "")
 					case "/items/empty":
@@ -1268,14 +1604,35 @@ if (false) client.rawEvents("", handlers);
 						http.Error(w, "bad query", http.StatusBadRequest)
 						return
 					}
-					if r.Method == http.MethodPost {
+					switch {
+					case r.URL.Path == "/reuse":
+						var body map[string]any
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Errorf("decode reuse body: %v", err)
+							http.Error(w, "bad body", http.StatusBadRequest)
+							return
+						}
+						for _, key := range []string{"limit", "unread", "text", "ids"} {
+							value, present := body[key]
+							if !present || value != nil {
+								t.Errorf("body field %s = %v, present %v", key, value, present)
+								http.Error(w, "bad body", http.StatusBadRequest)
+								return
+							}
+						}
+						if body["extra"] != "body" {
+							t.Errorf("bad reuse body: %v", body)
+							http.Error(w, "bad body", http.StatusBadRequest)
+							return
+						}
+					case r.Method == http.MethodPost:
 						var body testSDKEvent
 						if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Kind != "request" || r.Header.Get("X-Test") != "expected" {
 							t.Errorf("body/headers: %v, %+v, %v", err, body, r.Header)
 							http.Error(w, "bad body", http.StatusBadRequest)
 							return
 						}
-					} else if r.ContentLength > 0 {
+					case r.ContentLength > 0:
 						t.Error("GET query sent a JSON body")
 					}
 					if r.URL.Path == "/events" {
@@ -1358,5 +1715,314 @@ func assertGolden(t *testing.T, name, got string) {
 	}
 	if diff := cmp.Diff(string(want), got); diff != "" {
 		t.Errorf("%s mismatch (-want +got):\n%s", path, diff)
+	}
+}
+
+type testMetaIdentity struct {
+	Name string `json:"name"`
+}
+type testCustomMeta struct {
+	Kind     string `json:"kind"`
+	Identity testMetaIdentity
+	Extra    map[string]any
+}
+
+func (m testCustomMeta) MarshalJSON() ([]byte, error) {
+	fields := make(map[string]any, len(m.Extra)+1)
+	maps.Copy(fields, m.Extra)
+	fields["identity"] = m.Identity
+	fields["kind"] = m.Kind
+	return json.Marshal(fields)
+}
+
+type testMetaEnvelope struct {
+	Meta testCustomMeta `json:"meta"`
+}
+
+func TestCustomSourcesRoundTrip(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(testMetaEnvelope{Meta: testCustomMeta{Kind: "event", Identity: testMetaIdentity{Name: "client"}, Extra: map[string]any{"future": map[string]any{"enabled": true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := make(map[string]string)
+	for _, lang := range []string{"ts", "kt", "swift"} {
+		data, err := os.ReadFile("testdata/CustomMeta." + lang) //nolint:gosec // lang comes from the fixed fixture list.
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources[lang] = string(data)
+	}
+	for _, lang := range []Language{TypeScript, Kotlin, Swift} {
+		t.Run(string(lang), func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			typ := reflect.TypeFor[testMetaEnvelope]()
+			cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, KotlinPackage: "customcheck", Discriminated: []string{"testCustomMeta"}, ExtraSeeds: []reflect.Type{reflect.TypeFor[testSSEError]()}, ErrorModel: apispec.ClientErrorModel{TypeName: "testSSEError", TSCodeExpr: `"UNKNOWN"`, TSMessageExpr: "err.message", TSDetailsExpr: "undefined", KTCodeExpr: `"UNKNOWN"`, KTMessageExpr: "err.message", KTDetailsExpr: "null", SwiftCodeExpr: `"UNKNOWN"`, SwiftMessageExpr: "errResp.message", SwiftDetailsExpr: "nil"}, SpecialTypes: []apispec.SpecialType{{
+				Type: reflect.TypeFor[testCustomMeta](), TSType: "testCustomMeta", KTType: "testCustomMeta", SwiftType: "testCustomMeta", DocType: "testCustomMeta", TSSource: sources["ts"], KotlinSource: sources["kt"], SwiftSource: sources["swift"], TSValidator: "checkMeta", TSValidate: "checkMeta(%[1]s, %[2]q)", Dependencies: []reflect.Type{reflect.TypeFor[testMetaIdentity]()}, KotlinSymbols: []string{"MetaCodec"}, SwiftSymbols: []string{"MetaKey"},
+			}}, Routes: []apispec.Route{{Name: "events", Path: "/events", Resp: typ, IsSSE: true, SSEEvents: []apispec.SSEEvent{{Name: "custom", Handler: "onCustom", Resp: reflect.TypeFor[testCustomMeta]()}}}, {Name: "customEvents", Path: "/custom", Resp: reflect.TypeFor[testCustomMeta](), IsSSE: true}}}
+			api := NewAPI(root, "CustomSDK", NewVersion("v1", ".", cfg))
+			api.Languages = []Language{lang}
+			if err := api.Generate(); err != nil {
+				t.Fatal(err)
+			}
+			payloadFile := filepath.Join(root, "payload.json")
+			if err := os.WriteFile(payloadFile, payload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var dir, sourceName, source string
+			var cmds []*exec.Cmd
+			switch lang {
+			case TypeScript:
+				dir = filepath.Join(root, "ts", "v1")
+				if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"commonjs"}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				sourceName = "consumer.ts"
+				source = `import { validatetestMetaEnvelope, validatetestCustomMeta } from "./validate.gen";
+import { readFileSync } from "node:fs";
+const v = validatetestMetaEnvelope(JSON.parse(readFileSync(process.argv[2], "utf8")));
+if (v.meta.identity.name !== "client" || (v.meta.future as {enabled: boolean}).enabled !== true) throw Error("decode");
+const root = validatetestCustomMeta(v.meta);
+if (root.kind !== "event" || root.identity.name !== "client" || (root.future as {enabled: boolean}).enabled !== true) throw Error("root");
+const r = validatetestMetaEnvelope(JSON.parse(JSON.stringify(v)));
+if ((r.meta.future as {enabled: boolean}).enabled !== true) throw Error("encode");
+try { validatetestMetaEnvelope({meta: {kind: "event", identity: {name: 1}}}); throw Error("accepted invalid"); } catch (e) { if (!(e instanceof TypeError)) throw e; }`
+				// Avoid dependency on Node's ambient type declarations in the temporary package.
+				source = strings.ReplaceAll(source, `import { readFileSync } from "node:fs";`, `declare function require(name: string): { readFileSync(path: string, encoding: string): string }; declare const process: { argv: string[] }; const { readFileSync } = require("fs");`)
+				// #nosec G204 -- Commands use fixed tools and the temporary fixture path.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "consumer.ts", "api.gen.ts"), exec.CommandContext(t.Context(), "node", "consumer.js", payloadFile)}
+			case Kotlin:
+				cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+				if cp == "" {
+					t.Skip("Kotlin runtime dependencies unavailable")
+				}
+				dir = filepath.Join(root, "kotlin", "src", "main", "kotlin", "customcheck")
+				sourceName = "Runtime.kt"
+				source = `package customcheck
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+fun main(args: Array<String>) {
+ val json = Json { ignoreUnknownKeys = true }
+ val v = json.decodeFromString<testMetaEnvelope>(java.io.File(args[0]).readText())
+ check(v.meta.kind == "event" && v.meta.identity.name == "client" && v.meta.extra.getValue("future").jsonObject.getValue("enabled").jsonPrimitive.boolean)
+ val r = json.decodeFromString<testMetaEnvelope>(json.encodeToString(v))
+ check(r.meta.extra.getValue("future").jsonObject.getValue("enabled").jsonPrimitive.boolean)
+ try { json.decodeFromString<testMetaEnvelope>("""{"meta":{"kind":"event","identity":{"name":[]}}}"""); error("accepted invalid") } catch (_: kotlinx.serialization.SerializationException) {}
+ for (kind in listOf("123", "true", "null", "{}", "[]")) {
+  try { json.decodeFromString<testMetaEnvelope>("""{"meta":{"kind":$kind,"identity":{"name":"client"}}}"""); error("accepted invalid kind $kind") } catch (_: kotlinx.serialization.SerializationException) {}
+ }
+}`
+				// #nosec G204 G702 -- Compiler dependencies and sources are locally installed test inputs.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN"), "ApiClient.kt", "Types.kt", "CustomtestCustomMeta.kt", sourceName, "-include-runtime", "-d", "runtime.jar"), exec.CommandContext(t.Context(), "java", "-cp", "runtime.jar"+string(os.PathListSeparator)+cp, "customcheck.RuntimeKt", payloadFile)}
+			case Swift:
+				if _, err := exec.LookPath("swiftc"); err != nil {
+					t.Skip("Swift compiler unavailable")
+				}
+				dir = filepath.Join(root, "swift", "Sources", "CustomSDKV1")
+				transport, err := filepath.Abs("testdata/SSETransport.swift")
+				if err != nil {
+					t.Fatal(err)
+				}
+				sourceName = "Runtime.swift"
+				source = `import Foundation
+@main struct Run {
+ static func main() throws {
+  let decoder = JSONDecoder(); let encoder = JSONEncoder()
+  let v = try decoder.decode(testMetaEnvelope.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
+  guard v.meta.kind == "event" && v.meta.identity.name == "client", case .object(let future) = v.meta.extra["future"], case .bool(true) = future["enabled"] else { fatalError("decode") }
+  let r = try decoder.decode(testMetaEnvelope.self, from: encoder.encode(v))
+  guard case .object(let extra) = r.meta.extra["future"], case .bool(true) = extra["enabled"] else { fatalError("encode") }
+  do { _ = try decoder.decode(testMetaEnvelope.self, from: Data(#"{"meta":{"kind":"event","identity":{"name":[]}}}"#.utf8)); fatalError("accepted invalid") } catch {}
+ }
+}`
+				// #nosec G204 -- Fixed compiler consumes test sources in a private temporary directory.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", "ApiClient.swift", "Types.swift", "CustomtestCustomMeta.swift", sourceName, transport, "-o", "runtime"), exec.CommandContext(t.Context(), filepath.Join(dir, "runtime"), payloadFile)}
+			}
+			if err := os.WriteFile(filepath.Join(dir, sourceName), []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, cmd := range cmds {
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v\n%s", cmd.Path, err, out)
+				}
+			}
+		})
+	}
+}
+
+func TestMCPClientWireContract(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		lang     Language
+		required bool
+	}{{"TypeScript", TypeScript, false}, {"TypeScript renamed", TypeScript, true}, {"Kotlin presence", Kotlin, false}, {"Kotlin required", Kotlin, true}, {"Swift", Swift, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			lang := tc.lang
+			t.Parallel()
+			dir := t.TempDir()
+			typ := reflect.TypeFor[mcpschematest.JSONRPCRequest]()
+			cfg := apispec.Config[string]{SDKPackagePaths: map[string]struct{}{typ.PkgPath(): {}}, KotlinPackage: "mcpcheck", ExtraSeeds: []reflect.Type{reflect.TypeFor[mcpschematest.JSONRPCNotification](), reflect.TypeFor[mcpschematest.RequestMeta](), reflect.TypeFor[mcpschematest.ServerDiscoverResult]()},
+				SpecialTypes: []apispec.SpecialType{{Type: reflect.TypeFor[json.RawMessage](), TSType: "unknown", KTType: "JsonElement", SwiftType: "JSONValue", DocType: "JSONValue", TSValidate: "%[1]s"}, {Type: reflect.TypeFor[any](), TSType: "unknown", KTType: "JsonElement", SwiftType: "JSONValue", DocType: "JSONValue", TSValidate: "%[1]s"}},
+				ErrorModel:   apispec.ClientErrorModel{TypeName: "JSONRPCResponse", TSCodeExpr: `String(err.error?.code ?? "UNKNOWN")`, TSMessageExpr: `err.error?.message ?? ""`, TSDetailsExpr: "undefined", KTCodeExpr: `err.error?.code?.toString() ?: "UNKNOWN"`, KTMessageExpr: `err.error?.message ?: ""`, KTDetailsExpr: "null", SwiftCodeExpr: `String(errResp.error?.code ?? 0)`, SwiftMessageExpr: `errResp.error?.message ?? ""`, SwiftDetailsExpr: "nil"},
+				Routes:       []apispec.Route{{Name: "mcp", Method: "POST", Path: "", Req: typ, Resp: reflect.TypeFor[mcpschematest.JSONRPCResponse](), HeadersArg: true}},
+			}
+			if tc.required {
+				cfg.Routes[0].Req = reflect.TypeFor[mcpschematest.RequiredRequest]()
+				cfg.Routes[0].Resp = reflect.TypeFor[mcpschematest.RequiredResponse]()
+				cfg.ErrorModel.TypeName = "RequiredResponse"
+			}
+			api := NewAPI(dir, "MCPSDK", NewVersion("v1", "testdata/mcpschematest", cfg))
+			api.Languages = []Language{lang}
+			if err := api.Generate(); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/empty-stream" {
+					body, err := io.ReadAll(r.Body)
+					if err != nil || r.Method != http.MethodPost || len(body) != 0 {
+						t.Errorf("empty stream request: method %s, body %q, err %v", r.Method, body, err)
+						http.Error(w, "invalid request", http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					if _, err := fmt.Fprint(w, "data: empty-ok\n\n"); err != nil {
+						t.Error(err)
+						return
+					}
+					if err := http.NewResponseController(w).Flush(); err != nil {
+						t.Error(err)
+						return
+					}
+					<-r.Context().Done()
+					return
+				}
+				if r.Header.Get("Mcp-Method") != "server/discover" || r.Header.Get("Mcp-Protocol-Version") != "2026-07-28" {
+					t.Errorf("invalid headers: %v", r.Header)
+					http.Error(w, "headers", http.StatusBadRequest)
+					return
+				}
+				var request mcpschematest.JSONRPCRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode request: %v", err)
+					http.Error(w, "invalid", http.StatusBadRequest)
+					return
+				}
+				var params struct {
+					Meta mcpschematest.RequestMeta `json:"_meta"`
+				}
+				if err := json.Unmarshal(request.Params, &params); err != nil || request.JSONRPC != "2.0" || request.Method != mcpschematest.MethodDiscovery || len(request.ID) == 0 || string(request.ID) == "null" || params.Meta.ProtocolVersion != "2026-07-28" || params.Meta.ClientInfo.Name == "" {
+					t.Errorf("invalid request: %#v, params %#v, err %v", request, params, err)
+					http.Error(w, "request", http.StatusBadRequest)
+					return
+				}
+				if r.Header.Get("Accept") == "text/event-stream" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					payload, err := json.Marshal(mcpschematest.JSONRPCNotification{JSONRPC: "2.0", Method: "notification"})
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+						t.Error(err)
+						return
+					}
+					if err := http.NewResponseController(w).Flush(); err != nil {
+						t.Error(err)
+						return
+					}
+					<-r.Context().Done()
+					return
+				}
+				if err := json.NewEncoder(w).Encode(mcpschematest.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: mcpschematest.ServerDiscoverResult{Instructions: "ready"}}); err != nil {
+					t.Error(err)
+				}
+			}))
+			t.Cleanup(server.Close)
+			params, err := json.Marshal(struct {
+				Meta mcpschematest.RequestMeta `json:"_meta"`
+			}{Meta: mcpschematest.RequestMeta{ProtocolVersion: "2026-07-28", ClientInfo: mcpschematest.Implementation{Name: "swift", Version: "1"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := json.Marshal(mcpschematest.JSONRPCRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: mcpschematest.MethodDiscovery, Params: params})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestFile := filepath.Join(dir, "request.json")
+			if err := os.WriteFile(requestFile, request, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var cmds []*exec.Cmd
+			switch lang {
+			case TypeScript:
+				dir = filepath.Join(dir, "ts", "v1")
+				source, err := os.ReadFile("testdata/MCPClient.ts")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.required {
+					source = []byte(strings.ReplaceAll(string(source), "JSONRPCRequest", "RequiredRequest"))
+				}
+				// #nosec G703 -- Destination is inside the generated output in the test temporary directory.
+				if err := os.WriteFile(filepath.Join(dir, "consumer.ts"), source, 0600); err != nil {
+					t.Fatal(err)
+				}
+				output := t.TempDir()
+				// #nosec G204 G702 -- Fixed compilers use isolated generated sources and fixture server.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "tsc", "--ignoreConfig", "--strict", "--target", "ES2022", "--module", "commonjs", "--outDir", output, "consumer.ts"), exec.CommandContext(t.Context(), "node", filepath.Join(output, "consumer.js"), server.URL, requestFile)}
+			case Kotlin:
+				cp := os.Getenv("APISDKGEN_KOTLIN_CLASSPATH")
+				if cp == "" {
+					t.Skip("Kotlin dependencies unavailable")
+				}
+				dir = filepath.Join(dir, "kotlin", "src", "main", "kotlin", "mcpcheck")
+				source, err := os.ReadFile("testdata/MCPClient.kt")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.required {
+					source = []byte(strings.ReplaceAll(string(source), "JSONRPCRequest", "RequiredRequest"))
+					source = []byte(strings.ReplaceAll(string(source), `result is JSONPresence.Value && result.value.jsonObject`, `result != null && result.jsonObject`))
+				}
+				fixture := filepath.Join(dir, "MCPClient.kt")
+				// #nosec G703 -- Fixture is written in this test's private generated output.
+				if err := os.WriteFile(fixture, source, 0600); err != nil {
+					t.Fatal(err)
+				}
+				// #nosec G204 G702 -- Locally installed compiler dependencies and fixed fixture paths are trusted test inputs.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "kotlinc", "-cp", cp, "-Xplugin="+os.Getenv("APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN"), "ApiClient.kt", "Types.kt", fixture, "-include-runtime", "-d", "runtime.jar"), exec.CommandContext(t.Context(), "java", "-cp", "runtime.jar"+string(os.PathListSeparator)+cp, "mcpcheck.MCPClientKt", server.URL, requestFile)}
+			case Swift:
+				if runtime.GOOS != "linux" {
+					t.Skip("fixture transport targets Linux")
+				}
+				if _, err := exec.LookPath("swiftc"); err != nil {
+					t.Skip("Swift compiler unavailable")
+				}
+				dir = filepath.Join(dir, "swift", "Sources", "MCPSDKV1")
+				fixture, err := filepath.Abs("testdata/MCPClient.swift")
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport, err := filepath.Abs("testdata/SSETransport.swift")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// #nosec G204 G702 -- Fixed compiler consumes generated sources and fixtures under test control.
+				cmds = []*exec.Cmd{exec.CommandContext(t.Context(), "swiftc", "-swift-version", "5", "-parse-as-library", "ApiClient.swift", "Types.swift", fixture, transport, "-o", "runtime"), exec.CommandContext(t.Context(), filepath.Join(dir, "runtime"), server.URL, requestFile)}
+			}
+			for _, cmd := range cmds {
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v\n%s", cmd.Path, err, out)
+				}
+			}
+		})
 	}
 }
