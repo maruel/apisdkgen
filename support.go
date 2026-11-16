@@ -429,10 +429,17 @@ func valueSpecDoc(vs *ast.ValueSpec) string {
 
 // formatBlockDoc formats a doc string as a /** ... */ block comment with the given indent.
 // Returns an empty string when doc is empty.
+//
+// It escapes "/*" as "/\*" and "*/" as "*\/": "*/" would end the comment, and
+// Kotlin nests block comments, so "/*" would leave it unterminated. Both
+// escapes render as the original text in KDoc and TSDoc Markdown.
 func formatBlockDoc(doc, indent string) string {
 	if doc == "" {
 		return ""
 	}
+	// Escape openers first: escaping "*/" first turns "*/*" into "*\/*",
+	// which still contains "/*".
+	doc = strings.ReplaceAll(strings.ReplaceAll(doc, "/*", `/\*`), "*/", `*\/`)
 	lines := strings.Split(doc, "\n")
 	// Drop trailing empty lines.
 	for len(lines) > 0 && lines[len(lines)-1] == "" {

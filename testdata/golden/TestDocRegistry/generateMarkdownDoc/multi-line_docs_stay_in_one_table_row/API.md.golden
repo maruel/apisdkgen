@@ -36,4 +36,4 @@ All errors return:
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
-| `authKind` | `testDocAuthKind` | AuthKind selects the credential kind, a \| b.<br><br>Empty means oauth. | yes |
+| `authKind` | `testDocAuthKind` | AuthKind selects the credential kind, a \| b.<br><br>**Kinds**<br><br>Values:<br><br>• oauth<br>• apikey<br><br>See [RFC 6749](https://www.rfc-editor.org/rfc/rfc6749).<br><br><code>kind := a &#124; b</code><br><code>&nbsp;&nbsp;&nbsp;&nbsp;if &lt;x&gt;</code><br><br>Empty means oauth. | yes |

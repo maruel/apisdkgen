@@ -40,12 +40,14 @@ type testJSONKeys struct {
 }
 
 type testJSONWire struct {
-	Required    *string               `json:"required"`
-	List        []int                 `json:"list"`
-	Bytes       []byte                `json:"bytes"`
-	NamedBytes  testNamedBytes        `json:"namedBytes"`
-	Raw         json.RawMessage       `json:"raw"`
-	Lookup      map[string]*int       `json:"lookup"`
+	Required   *string         `json:"required"`
+	List       []int           `json:"list"`
+	Bytes      []byte          `json:"bytes"`
+	NamedBytes testNamedBytes  `json:"namedBytes"`
+	Raw        json.RawMessage `json:"raw"`
+	Lookup     map[string]*int `json:"lookup"`
+	// Omitted matches paths like a/*/b; generated block comments must survive
+	// both delimiters.
 	Omitted     *string               `json:"omitted,omitempty"`
 	Container   *map[string]int       `json:"container,omitempty"`
 	PointerZero *int                  `json:"pointerZero,omitzero"`
@@ -842,7 +844,7 @@ func TestDocRegistry(t *testing.T) {
 					}},
 				},
 				fieldDoc: map[string]map[string]string{"testDocProviderQuota": {
-					"AuthKind": "AuthKind selects the credential\nkind, a | b.\n\nEmpty means oauth.",
+					"AuthKind": "AuthKind selects the credential\nkind, a | b.\n\n# Kinds\n\nValues:\n  - oauth\n  - apikey\n\nSee [RFC 6749].\n\n\tkind := a | b\n\t\tif <x>\n\nEmpty means oauth.\n\n[RFC 6749]: https://www.rfc-editor.org/rfc/rfc6749",
 				}},
 				aliases: []aliasInfo{{
 					name: "testDocAuthKind",

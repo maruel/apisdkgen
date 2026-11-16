@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/doc/comment"
+	"html"
 	"maps"
 	"path/filepath"
 	"reflect"
@@ -1165,18 +1167,11 @@ func (d *docRegistry[C]) emitTSStruct(b *strings.Builder, t reflect.Type) error 
 			return fmt.Errorf("%s.%s: %w", name, jsonName, err)
 		}
 
-		// Field-level doc: block comment for multi-line, inline for single-line.
 		fdoc := ""
 		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
 			fdoc = fdocs[sf.Name]
 		}
-		if fdoc != "" {
-			if strings.Contains(fdoc, "\n") {
-				b.WriteString(formatBlockDoc(fdoc, "  "))
-			} else {
-				fmt.Fprintf(b, "  /** %s */\n", fdoc)
-			}
-		}
+		b.WriteString(formatBlockDoc(fdoc, "  "))
 
 		key := tsObjectKey(jsonName)
 		if optional {
@@ -2313,18 +2308,84 @@ func (d *docRegistry[C]) writeDocAlias(b *strings.Builder, a *aliasInfo) {
 	}
 }
 
-// markdownCell renders text as one Markdown table cell. A table row ends at a
-// newline, so it joins lines with spaces and paragraphs with <br><br>, and
-// escapes pipes that would split the cell.
-func markdownCell(s string) string {
-	paras := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n\n")
-	out := paras[:0]
-	for _, p := range paras {
-		if p = strings.Join(strings.Fields(p), " "); p != "" {
-			out = append(out, p)
+// markdownCell renders a Go doc comment as one Markdown table cell. A table
+// row ends at a newline, so it joins blocks with <br><br>, list items and code
+// lines with <br>, and the lines of a paragraph with spaces. It escapes pipes
+// that would split the cell.
+func markdownCell(doc string) string {
+	var p comment.Parser
+	blocks := p.Parse(doc).Content
+	out := make([]string, 0, len(blocks))
+	for _, blk := range blocks {
+		if s := markdownCellBlock(blk); s != "" {
+			out = append(out, s)
 		}
 	}
-	return strings.ReplaceAll(strings.Join(out, "<br><br>"), "|", `\|`)
+	return strings.Join(out, "<br><br>")
+}
+
+func markdownCellBlock(blk comment.Block) string {
+	switch blk := blk.(type) {
+	case *comment.Paragraph:
+		return markdownCellText(blk.Text)
+	case *comment.Heading:
+		return "**" + markdownCellText(blk.Text) + "**"
+	case *comment.List:
+		items := make([]string, 0, len(blk.Items))
+		for _, it := range blk.Items {
+			parts := make([]string, 0, len(it.Content))
+			for _, c := range it.Content {
+				parts = append(parts, markdownCellBlock(c))
+			}
+			marker := "•"
+			if it.Number != "" {
+				marker = it.Number + "."
+			}
+			items = append(items, marker+" "+strings.Join(parts, " "))
+		}
+		return strings.Join(items, "<br>")
+	case *comment.Code:
+		// A code span cannot hold a <br>, so each line is HTML; GFM splits cells
+		// on a pipe even inside HTML.
+		lines := strings.Split(strings.TrimSuffix(blk.Text, "\n"), "\n")
+		for i, l := range lines {
+			trimmed := strings.TrimLeft(l, " \t")
+			indent := strings.ReplaceAll(l[:len(l)-len(trimmed)], "\t", "    ")
+			indent = strings.Repeat("&nbsp;", len(indent))
+			lines[i] = "<code>" + indent + strings.ReplaceAll(html.EscapeString(trimmed), "|", "&#124;") + "</code>"
+		}
+		return strings.Join(lines, "<br>")
+	default:
+		return ""
+	}
+}
+
+// markdownCellText renders inline doc text on one line.
+func markdownCellText(texts []comment.Text) string {
+	var b strings.Builder
+	var walk func([]comment.Text)
+	walk = func(texts []comment.Text) {
+		for _, t := range texts {
+			switch t := t.(type) {
+			case comment.Plain:
+				b.WriteString(string(t))
+			case comment.Italic:
+				b.WriteString("*" + string(t) + "*")
+			case *comment.Link:
+				if t.Auto {
+					b.WriteString(t.URL)
+					continue
+				}
+				b.WriteString("[")
+				walk(t.Text)
+				b.WriteString("](" + t.URL + ")")
+			case *comment.DocLink:
+				walk(t.Text)
+			}
+		}
+	}
+	walk(texts)
+	return strings.ReplaceAll(strings.Join(strings.Fields(b.String()), " "), "|", `\|`)
 }
 
 func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error {
