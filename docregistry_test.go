@@ -824,6 +824,39 @@ func TestDocRegistry(t *testing.T) {
 			data := out.files[filepath.Join(outDir, "API.md")]
 			assertGolden(t, "API.md", data)
 		})
+		t.Run("multi-line docs stay in one table row", func(t *testing.T) {
+			t.Parallel()
+			outDir := "generated"
+			out := &preparedOutput{files: map[string]string{}}
+			quotaType := reflect.TypeFor[testDocProviderQuota]()
+			docs := &docRegistry[string]{
+				cfg: &apispec.Config[string]{
+					APIDocTitle:     "Test API",
+					SDKPackagePaths: map[string]struct{}{quotaType.PkgPath(): {}},
+					Routes: []apispec.Route{{
+						Name:   "quota",
+						Method: "GET",
+						Path:   "/quota",
+						Doc:    "Returns the quota\nfor the caller.",
+						Resp:   quotaType,
+					}},
+				},
+				fieldDoc: map[string]map[string]string{"testDocProviderQuota": {
+					"AuthKind": "AuthKind selects the credential\nkind, a | b.\n\nEmpty means oauth.",
+				}},
+				aliases: []aliasInfo{{
+					name: "testDocAuthKind",
+					constants: []aliasConstant{
+						{name: "testDocAuthKindOAuth", value: "oauth", doc: "OAuth\ncredentials."},
+					},
+				}},
+			}
+			if err := docs.generateMarkdownDoc(filepath.Join(outDir, "API.md"), out); err != nil {
+				t.Fatal(err)
+			}
+			data := out.files[filepath.Join(outDir, "API.md")]
+			assertGolden(t, "API.md", data)
+		})
 	})
 	t.Run("writeKotlinClient", func(t *testing.T) { //nolint:dupl // Kotlin and Swift clients need parallel SSE golden coverage.
 		t.Run("query routes", func(t *testing.T) {

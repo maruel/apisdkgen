@@ -2196,7 +2196,7 @@ func (d *docRegistry[C]) generateMarkdownDoc(path string, out *preparedOutput) e
 					resp += "<br>Named events: " + strings.Join(named, ", ")
 				}
 			}
-			fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s |\n", r.Method, r.Path, r.Doc, req, resp)
+			fmt.Fprintf(&b, "| %s | `%s` | %s | %s | %s |\n", r.Method, r.Path, markdownCell(r.Doc), req, resp)
 		}
 	}
 
@@ -2309,12 +2309,22 @@ func (d *docRegistry[C]) writeDocAlias(b *strings.Builder, a *aliasInfo) {
 	b.WriteString("| Value | Description |\n")
 	b.WriteString("|-------|-------------|\n")
 	for _, c := range a.constants {
-		fmt.Fprintf(b, "| `%s` | %s |\n", c.value, enumValueDescription(c))
+		fmt.Fprintf(b, "| `%s` | %s |\n", c.value, markdownCell(c.doc))
 	}
 }
 
-func enumValueDescription(c aliasConstant) string {
-	return strings.ReplaceAll(strings.Join(strings.Fields(c.doc), " "), "|", `\|`)
+// markdownCell renders text as one Markdown table cell. A table row ends at a
+// newline, so it joins lines with spaces and paragraphs with <br><br>, and
+// escapes pipes that would split the cell.
+func markdownCell(s string) string {
+	paras := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n\n")
+	out := paras[:0]
+	for _, p := range paras {
+		if p = strings.Join(strings.Fields(p), " "); p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.ReplaceAll(strings.Join(out, "<br><br>"), "|", `\|`)
 }
 
 func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error {
@@ -2345,7 +2355,7 @@ func (d *docRegistry[C]) writeDocType(b *strings.Builder, t reflect.Type) error 
 		}
 		fieldDoc := ""
 		if fdocs, ok := d.fieldDoc[f.owner.Name()]; ok {
-			fieldDoc = fdocs[sf.Name]
+			fieldDoc = markdownCell(fdocs[sf.Name])
 		}
 		if name := sf.Tag.Get("query"); name != "" && name != "-" {
 			if fieldDoc != "" {
