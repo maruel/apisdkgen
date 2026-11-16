@@ -38,16 +38,13 @@ verify: custom-gcl
 	@git diff --check
 
 test-deps:
-	@./scripts/install-test-deps.sh
+	@./scripts/install_test_deps.py
 
 test update-golden: test-deps
 	@set -eu; \
 	classpath=; \
 	while IFS= read -r jar; do classpath="$$classpath$(CURDIR)/.test-deps/$$jar:"; done < "$(CURDIR)/.test-deps/kotlin-jars"; \
 	export PATH="$(CURDIR)/.test-deps/node_modules/.bin:$(CURDIR)/.test-deps/bin:$$PATH" \
-	SWIFTLY_HOME_DIR="$(CURDIR)/.test-deps/swiftly" \
-	SWIFTLY_BIN_DIR="$(CURDIR)/.test-deps/bin" \
-	SWIFTLY_TOOLCHAINS_DIR="$(CURDIR)/.test-deps/swiftly/toolchains" \
 	APISDKGEN_KOTLIN_CLASSPATH="$${classpath%:}" \
 	APISDKGEN_KOTLIN_SERIALIZATION_PLUGIN="$(CURDIR)/.test-deps/kotlin/lib/kotlinx-serialization-compiler-plugin.jar"; \
 	if [ "$@" = update-golden ]; then \

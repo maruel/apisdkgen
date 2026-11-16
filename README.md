@@ -21,11 +21,10 @@ for the generator and specification contracts.
 
 Run `make test-deps` to install pinned TypeScript, Kotlin, Swift (on Linux),
 and JVM libraries in the ignored `.test-deps` directory. The installer needs
-Java, Node/npm, Python 3, curl, GnuPG, tar, and unzip. Swiftly reports any missing system libraries.
-If initial Swiftly setup fails while importing GPG keys on a minimal Linux
-installation, install the `gpg-agent` package before retrying.
-On Ubuntu, install `libcurl4-openssl-dev` before running the installer;
-CI installs this package before `make test-deps`.
+Java, Node/npm, Python 3, and GnuPG. It verifies the swift.org toolchain
+signature and supports Ubuntu and Debian on x86_64 and aarch64. The toolchain
+needs the system libraries listed on swift.org; on Ubuntu, install
+`libcurl4-openssl-dev`, which CI installs before `make test-deps`.
 `make test` installs missing dependencies, sets the compiler paths and Kotlin
 classpath, and runs the complete suite without the Go test cache. Kotlin compiler
 and runtime versions are owned by `kotlin-dependencies.json`, which supplies both
